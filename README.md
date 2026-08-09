@@ -4,6 +4,12 @@ Archive Scout is a cross-platform desktop research workspace for indexing, downl
 
 The official release keeps the established project-based workflow while adding AI-assisted relevance review, a substantially expanded external embedded-media pipeline, clearer site-specific Wayback diagnostics, and further large-project performance work.
 
+## Downloads
+
+- Download for Windows x64
+- Download for Linux x64
+- Download for macOS Intel and Apple Silicon
+
 ## Core workflow
 
 A typical research project follows this sequence:
