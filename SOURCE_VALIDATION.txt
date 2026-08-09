@@ -1,0 +1,55 @@
+Archive Scout 1.0.0 source validation
+Date: 2026-08-09
+
+Automated validation
+- 147 automated tests completed successfully.
+- 1 display-dependent theme test was skipped because no graphical display is available in this environment.
+- Python compilation completed for archive_scout, tests, and scripts.
+- .github/workflows/tests.yml parsed successfully as YAML.
+- .github/workflows/build-and-release.yml parsed successfully as YAML.
+- scripts/build_linux.sh passed bash syntax validation.
+- scripts/build_macos.sh passed bash syntax validation.
+- Python wheel packaging completed successfully as archive_scout-1.0.0-py3-none-any.whl using the installed build backend.
+- Public application/package version is 1.0.0.
+- Database schema version is 6 with migration coverage from schema version 5.
+
+AI relevance validation
+- AI relevance operates on matches from an existing deterministic scan and does not replace or mutate Archive Scout scores.
+- Project configuration round-trips AI settings without storing an API key.
+- Missing API keys fail before an AI run is created.
+- The OpenAI request contract is tested with store=false, strict JSON-schema output, exact candidate IDs, and explicit archived-content prompt-injection isolation.
+- Mocked AI results persist independently and export to CSV, JSON, and Markdown.
+- No live OpenAI API request was made during source validation.
+
+External embedded-media validation
+- Modern lazy image attributes, srcset, video/source/poster tags, social metadata, preload hints, CSS/background URLs, legacy player configuration, and Wayback replay URL unwrapping are covered.
+- External-media discovery is persistent by source-document content hash, so unchanged pages are not reparsed on repeat runs.
+- Exact external-media CDX lookups use a persistent queue and bounded concurrency.
+- The dedicated external-media workflow defines external hosts relative to the site actually indexed and scanned, not optional direct-media targets.
+- Known Wayback-excluded or robots-blocked hosts are short-circuited instead of repeatedly queried.
+- Media downloads retain direct-to-disk streaming and incremental hashing.
+
+Site issue validation
+- Wayback exclusion, robots restrictions, missing captures, invalid replay responses, access restrictions, rate limits, timeouts, connection failures, TLS failures, and server errors have distinct classifications where evidence permits.
+- Repeated host/stage issues are deduplicated with occurrence counts.
+- Confirmed exclusion/robots conditions can act as host-level circuits while unrelated targets continue.
+
+Offline performance validation
+100,000-row profile:
+- 100,000 CDX rows parsed in 2.233 seconds.
+- Parse-and-upsert completed in 4.394 seconds.
+- Repeating the same 100,000-row index produced 0 unchanged-row database writes.
+- Parser peak traced memory: 23,847,113 bytes.
+- HTTP attempts: 0.
+
+1,000,000-row parser profile:
+- 1,000,000 CDX rows parsed in 21.330 seconds.
+- Parser peak traced memory: 24,047,119 bytes.
+- HTTP attempts: 0.
+
+Release limitations
+- Native Windows, macOS, and Linux distributable packages were not produced in this Linux validation environment.
+- Real code-signing/notarization transactions were not performed.
+- A live Internet Archive stress test was not performed.
+- A live OpenAI API relevance request was not performed because validation does not include a user API key.
+- Native GitHub Actions builds and smoke tests should complete successfully before the v1.0.0 tag is published.
