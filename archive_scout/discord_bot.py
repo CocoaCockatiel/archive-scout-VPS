@@ -49,6 +49,28 @@ def parse_targets(primary: str, additional: str = "") -> list[str]:
     return targets
 
 
+def build_help_text(max_concurrent_jobs: int) -> str:
+    return f"""**Archive Scout quick start**
+
+The bot stays online 24/7 and can run up to **{max_concurrent_jobs} separate projects at once**. A completed search stops and frees its slot; it does not automatically repeat.
+
+**Run three searches concurrently**
+1. Create three projects with `/scout create` (for example `case-one`, `case-two`, and `case-three`). Each project needs a target, keywords, and optional dates.
+2. Start each with `/scout run project:case-one mode:all`, then repeat for `case-two` and `case-three`.
+3. Check all jobs with `/scout status`, or one with `/scout status project:case-one`.
+
+**Useful commands**
+- `/scout create` - Create a search. Put extra related sites in `additional_targets`, separated by semicolons.
+- `/scout projects` - List saved projects.
+- `/scout run ... mode:all` - Index, download, scan, and create reports.
+- `/scout stop project:case-one` - Safely stop one job.
+- `/scout run project:case-one mode:resume` - Continue an interrupted job.
+- `/scout reports project:case-one` - List its reports.
+- `/scout get-report` - Download a small report through Discord.
+
+Different projects may run together, but the bot blocks two operations on the same project to protect its database. If every slot is busy, wait for a job to finish or stop one."""
+
+
 @dataclass(frozen=True, slots=True)
 class BotSettings:
     token: str
@@ -216,6 +238,14 @@ class ScoutCog(commands.Cog):
                 return True
         await interaction.response.send_message("You are not allowed to run Archive Scout.", ephemeral=True)
         return False
+
+    @scout.command(name="help", description="Explain how to create and run Archive Scout searches")
+    async def help(self, interaction: discord.Interaction) -> None:
+        if not await self.authorized(interaction):
+            return
+        await interaction.response.send_message(
+            build_help_text(self.bot.settings.max_concurrent_jobs), ephemeral=True
+        )
 
     @scout.command(name="create", description="Create a new Archive Scout project")
     @app_commands.describe(

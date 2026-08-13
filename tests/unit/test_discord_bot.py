@@ -3,7 +3,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from archive_scout.discord_bot import JobManager, parse_snowflakes, parse_targets, safe_project_dir
+from archive_scout.discord_bot import (
+    JobManager,
+    build_help_text,
+    parse_snowflakes,
+    parse_targets,
+    safe_project_dir,
+)
 
 
 def test_parse_snowflakes() -> None:
@@ -26,6 +32,14 @@ def test_parse_multiple_targets() -> None:
         "www.example.com/*",
         "forum.example.com/*",
     ]
+
+
+def test_help_text_explains_configured_concurrency() -> None:
+    text = build_help_text(3)
+    assert "3 separate projects at once" in text
+    assert "mode:resume" in text
+    assert "does not automatically repeat" in text
+    assert len(text) <= 2000
 
 
 def test_job_manager_allows_distinct_projects_up_to_limit(tmp_path: Path) -> None:

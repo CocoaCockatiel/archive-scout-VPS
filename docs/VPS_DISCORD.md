@@ -61,6 +61,7 @@ docker compose exec -T archive-scout-bot tar -C /data -czf - projects > archive-
 
 ## Commands
 
+- `/scout help` shows an in-Discord quick-start guide, including how to run several searches at once.
 - `/scout create` creates a project with one or more targets and comma-separated keyword rules.
   Put extra targets in `additional_targets`, separated by semicolons.
 - `/scout projects` lists available projects.
