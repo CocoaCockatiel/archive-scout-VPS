@@ -187,7 +187,7 @@ class HttpClient:
                 status = int(response.status)
 
                 retry_after_header = response.headers.get("retry-after") or response.headers.get("Retry-After")
-                if status == 429 or (status == 503 and retry_after_header):
+                if status in {429, 503}:
                     retry_after = parse_retry_after(retry_after_header)
                     rate_attempt += 1
                     wait_seconds = self.host_gate.pause_for_rate_limit(retry_after, f"HTTP {status}")
@@ -353,7 +353,7 @@ class HttpClient:
                     )
                 status = int(response.status)
                 retry_after_header = response.headers.get("retry-after") or response.headers.get("Retry-After")
-                if status == 429 or (status == 503 and retry_after_header):
+                if status in {429, 503}:
                     destination.unlink(missing_ok=True)
                     retry_after = parse_retry_after(retry_after_header)
                     rate_attempt += 1

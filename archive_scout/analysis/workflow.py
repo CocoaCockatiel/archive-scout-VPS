@@ -14,7 +14,7 @@ from ..config import ProjectConfig
 from ..constants import CDX_URL
 from ..cdx.parameters import cdx_endpoints
 from ..database.repositories import upsert_media_capture
-from ..downloads.rate_limit import FixedRateLimiter, SharedHostGate
+from ..downloads.rate_limit import SharedFixedRateLimiter, shared_host_gate
 from ..events import ProgressEvent, Stopped
 from ..extraction.provenance import trace_provenance
 from ..extraction.regex import parse_extractor_rules, run_extractors
@@ -100,8 +100,8 @@ def _lookup_external_assets(
         """,
         (total,),
     )
-    limiter = FixedRateLimiter(config.cdx_delay)
-    host_gate = SharedHostGate(config.rate_limit_base_pause, config.rate_limit_max_pause)
+    limiter = SharedFixedRateLimiter(config.cdx_delay)
+    host_gate = shared_host_gate(config.rate_limit_base_pause, config.rate_limit_max_pause)
 
     def retry_callback(attempt: int, total: int, reason: str, wait: float) -> None:
         _emit(callback, "asset_search", f"External asset request delayed ({reason}); retry {attempt}/{total or '∞'} in {wait:.1f}s")
@@ -117,8 +117,8 @@ def _lookup_external_assets(
         read_timeout=min(max(config.read_timeout, 15.0), 60.0),
         pool_size=1,
         host_gate=host_gate,
-        rate_limit_attempts=0,
-        rate_limit_max_wait=0,
+        rate_limit_attempts=config.rate_limit_attempts,
+        rate_limit_max_wait=config.rate_limit_max_wait,
         network_backend=config.network.normalized().backend,
         trust_environment=config.network.normalized().trust_environment,
         network_callback=(lambda message: callback(ProgressEvent("network", message)) if callback else None),

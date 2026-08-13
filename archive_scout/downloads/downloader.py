@@ -22,7 +22,7 @@ from ..scanning.jobs import ScanJob
 from ..scanning.keywords import compile_prefilter
 from ..scanning.scoring import analyze_content, prepare_analysis_fields
 from ..utils import atomic_write_text, hash_text, normalize_search, utc_now
-from .rate_limit import FixedRateLimiter, SharedHostGate
+from .rate_limit import SharedFixedRateLimiter, shared_host_gate
 from .validation import classify_exception
 
 
@@ -34,6 +34,22 @@ def replay_url(timestamp: str, original: str) -> str:
 def capture_path(root: Path, capture_id: int, timestamp: str, original: str) -> Path:
     digest = hashlib.sha1(original.encode("utf-8", "surrogatepass")).hexdigest()
     return root / "captures" / timestamp[:4] / timestamp[4:6] / f"{capture_id}_{digest}.txt"
+
+
+def cumulative_download_progress(
+    database: sqlite3.Connection,
+    config: ProjectConfig,
+    queued_total: int,
+    capture_ids: list[int] | None = None,
+) -> tuple[int, int]:
+    """Return completed/total progress across the whole resumable CDX queue."""
+    if capture_ids:
+        return 0, max(0, int(queued_total))
+    signature = cdx_query_signature(config)
+    total = int(database.execute(
+        "SELECT COUNT(*) FROM captures WHERE query_signature=?", (signature,)
+    ).fetchone()[0])
+    return max(0, total - int(queued_total)), total
 
 
 def prepare_download_rows(
@@ -269,12 +285,19 @@ def download_archive(
     total, row_iter = prepare_download_rows(
         database, config, combined_patterns, states=states, capture_ids=capture_ids
     )
+    completed_before, cumulative_total = cumulative_download_progress(
+        database, config, total, capture_ids
+    )
     if not total:
         if callback:
-            callback(ProgressEvent("download", "No matching captures to download.", 0, 0))
+            callback(ProgressEvent(
+                "download",
+                f"No matching captures remain to download; project progress {completed_before:,}/{cumulative_total:,}.",
+                completed_before, cumulative_total,
+            ))
         return
-    limiter = FixedRateLimiter(config.download_delay)
-    host_gate = SharedHostGate(config.rate_limit_base_pause, config.rate_limit_max_pause)
+    limiter = SharedFixedRateLimiter(config.download_delay)
+    host_gate = shared_host_gate(config.rate_limit_base_pause, config.rate_limit_max_pause)
 
     def on_retry(attempt: int, total_attempts: int, reason: str, wait_seconds: float) -> None:
         if callback:
@@ -298,8 +321,8 @@ def download_archive(
         read_timeout=config.read_timeout,
         pool_size=config.workers,
         host_gate=host_gate,
-        rate_limit_attempts=0,
-        rate_limit_max_wait=0,
+        rate_limit_attempts=config.rate_limit_attempts,
+        rate_limit_max_wait=config.rate_limit_max_wait,
         network_backend=config.network.normalized().backend,
         trust_environment=config.network.normalized().trust_environment,
         network_callback=(lambda message: callback(ProgressEvent("network", message)) if callback else None),
@@ -403,14 +426,15 @@ def download_archive(
                     completed += 1
                     elapsed = max(0.001, time.monotonic() - started)
                     rate = completed / elapsed
+                    cumulative_completed = min(cumulative_total, completed_before + completed)
                     if callback:
                         callback(
                             ProgressEvent(
                                 "download",
-                                f"Downloaded/scanned {completed:,}/{total:,}; matches {matched:,}; errors {failures:,}; "
-                                f"{rate:.1f}/s",
-                                completed,
-                                total,
+                                f"Downloaded/scanned {cumulative_completed:,}/{cumulative_total:,}; "
+                                f"this pass {completed:,}/{total:,}; matches {matched:,}; errors {failures:,}; {rate:.1f}/s",
+                                cumulative_completed,
+                                cumulative_total,
                                 {
                                     "matched": matched,
                                     "failures": failures,

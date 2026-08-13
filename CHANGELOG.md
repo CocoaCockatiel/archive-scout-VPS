@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.1
+
+- Resume now re-enters any saved incomplete CDX index queue before downloading, so an interrupted indexing run cannot be mistaken for a complete project.
+- Wayback 503 responses now enter the same process-wide coordinated host pause as 429 responses even when Retry-After is absent.
+- All archive/index/media clients in one process now share request-start coordination and a host recovery gate, preventing concurrent projects on one machine or VPS from multiplying traffic independently.
+- Coordinated pause budgets are finite by default (15 minutes / 8 incidents); legacy zero values normalize to the safety defaults instead of waiting indefinitely.
+- Download progress is cumulative across resumes and operation progress is persisted in operation_runs for external integrations.
+- Added is_recoverable_pause() as a stable integration contract so bot/front-end wrappers can report saved network pauses separately from failures.
+- Added regression coverage for the audit findings.
+
 ## 1.0.0
 
 - First official Archive Scout release.

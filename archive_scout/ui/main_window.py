@@ -188,7 +188,7 @@ class ArchiveScoutApp(tk.Tk):
         self.download_delay_var = tk.StringVar(value="0.5")
         self.rate_limit_base_var = tk.StringVar(value="30")
         self.rate_limit_max_var = tk.StringVar(value="300")
-        self.rate_limit_wait_var = tk.StringVar(value="0")
+        self.rate_limit_wait_var = tk.StringVar(value="15")
         self.status_var = tk.StringVar(value="Ready")
         self.progress_var = tk.DoubleVar(value=0)
         self.theme_var = tk.StringVar(value="System")
@@ -745,8 +745,8 @@ class ArchiveScoutApp(tk.Tk):
             ("Minimum report score", self.minimum_score_var),
             ("CDX request spacing (seconds)", self.cdx_delay_var),
             ("Download request spacing (seconds)", self.download_delay_var),
-            ("429 initial pause (seconds)", self.rate_limit_base_var),
-            ("429 maximum pause (seconds)", self.rate_limit_max_var),
+            ("429/503 initial shared pause (seconds)", self.rate_limit_base_var),
+            ("429/503 maximum shared pause (seconds)", self.rate_limit_max_var),
         ]
         for row, (label, variable) in enumerate(performance, start=1):
             ttk.Label(tab, text=label + ":").grid(row=row, column=0, sticky="w", pady=4)
