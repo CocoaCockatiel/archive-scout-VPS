@@ -1,8 +1,9 @@
 # VPS and Discord deployment
 
-This deployment runs one Archive Scout operation at a time. Project databases, downloaded
-captures, and reports live in the Docker volume `archive-scout-data` and survive image rebuilds
-and container restarts.
+This deployment can run several independent Archive Scout projects at once. It never runs two
+operations against the same project database concurrently. Project databases, downloaded captures,
+and reports live in the Docker volume `archive-scout-data` and survive image rebuilds and container
+restarts.
 Interrupted Archive Scout queues remain resumable with `/scout run project:NAME mode:resume`.
 
 ## 1. Create the Discord application
@@ -30,7 +31,9 @@ chmod 600 .env
 ```
 
 Set `DISCORD_BOT_TOKEN`, `DISCORD_GUILD_ID`, and either `DISCORD_ALLOWED_USER_IDS` or
-`DISCORD_ALLOWED_ROLE_IDS`. Never commit `.env`.
+`DISCORD_ALLOWED_ROLE_IDS`. Set `ARCHIVE_SCOUT_MAX_CONCURRENT_JOBS` to the desired concurrency
+limit. Start at `3` for an 8-core, 24 GB VPS; Wayback throttling is usually the limiting resource.
+Never commit `.env`.
 
 ## 3. Start it 24/7
 
@@ -58,11 +61,12 @@ docker compose exec -T archive-scout-bot tar -C /data -czf - projects > archive-
 
 ## Commands
 
-- `/scout create` creates a project with one target and comma-separated keyword rules.
+- `/scout create` creates a project with one or more targets and comma-separated keyword rules.
+  Put extra targets in `additional_targets`, separated by semicolons.
 - `/scout projects` lists available projects.
 - `/scout run` starts an operation such as `all`, `resume`, `report`, or `integrity`.
-- `/scout status` shows the latest progress event.
-- `/scout stop` requests a safe stop after the current network operation.
+- `/scout status` shows all active jobs, or one named project's latest progress.
+- `/scout stop` safely stops a named project after its current network operation.
 - `/scout reports` lists generated report files.
 - `/scout get-report` uploads a small report file to Discord.
 
@@ -72,6 +76,8 @@ slash-command interaction token.
 ## Operational notes
 
 - Run the bot in a private channel when project targets or results are sensitive.
+- Concurrent operation is across separate projects. Create a separate project for each independent
+  search, then invoke `/scout run` for each one.
 - Archive Scout respects Wayback exclusions and rate limits; do not increase concurrency simply to
   work around archive restrictions.
 - `import_folder` and `merge_project` are intentionally unavailable from Discord because they

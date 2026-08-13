@@ -41,6 +41,14 @@ def safe_project_dir(root: Path, name: str) -> Path:
     return candidate
 
 
+def parse_targets(primary: str, additional: str = "") -> list[str]:
+    values = [primary, *re.split(r"[;\n]+", additional)]
+    targets = list(dict.fromkeys(value.strip() for value in values if value.strip()))
+    if not targets:
+        raise ValueError("Provide at least one target")
+    return targets
+
+
 @dataclass(frozen=True, slots=True)
 class BotSettings:
     token: str
@@ -49,6 +57,7 @@ class BotSettings:
     allowed_user_ids: frozenset[int]
     allowed_role_ids: frozenset[int]
     max_upload_bytes: int
+    max_concurrent_jobs: int
 
     @classmethod
     def from_environment(cls) -> BotSettings:
@@ -58,6 +67,7 @@ class BotSettings:
         guild = os.environ.get("DISCORD_GUILD_ID", "").strip()
         root = Path(os.environ.get("ARCHIVE_SCOUT_PROJECTS_ROOT", "/data/projects"))
         upload_mb = max(1, int(os.environ.get("DISCORD_MAX_UPLOAD_MB", "8")))
+        max_jobs = min(16, max(1, int(os.environ.get("ARCHIVE_SCOUT_MAX_CONCURRENT_JOBS", "3"))))
         return cls(
             token=token,
             projects_root=root.expanduser().resolve(),
@@ -65,6 +75,7 @@ class BotSettings:
             allowed_user_ids=parse_snowflakes(os.environ.get("DISCORD_ALLOWED_USER_IDS")),
             allowed_role_ids=parse_snowflakes(os.environ.get("DISCORD_ALLOWED_ROLE_IDS")),
             max_upload_bytes=upload_mb * 1024 * 1024,
+            max_concurrent_jobs=max_jobs,
         )
 
 
@@ -93,8 +104,11 @@ class ActiveJob:
 class JobManager:
     def __init__(self, bot: ArchiveScoutBot) -> None:
         self.bot = bot
-        self.active: ActiveJob | None = None
+        self.active: dict[str, ActiveJob] = {}
         self._guard = asyncio.Lock()
+
+    def running(self) -> list[ActiveJob]:
+        return [job for job in self.active.values() if job.task and not job.task.done()]
 
     async def start(
         self,
@@ -104,17 +118,29 @@ class JobManager:
         channel_id: int,
     ) -> tuple[bool, str]:
         async with self._guard:
-            if self.active and self.active.task and not self.active.task.done():
-                return False, self.active.summary()
+            running = self.running()
+            key = project.casefold()
+            if key in self.active and self.active[key] in running:
+                return False, f"**{project}** already has a running operation."
+            if len(running) >= self.bot.settings.max_concurrent_jobs:
+                names = ", ".join(f"`{job.project}`" for job in running)
+                return False, (
+                    f"The {self.bot.settings.max_concurrent_jobs}-job concurrency limit is full: "
+                    f"{names}. Wait for one to finish or stop one."
+                )
             project_file = safe_project_dir(self.bot.settings.projects_root, project) / "project.json"
             if not project_file.is_file():
                 return False, f"Project `{project}` does not exist. Use `/scout create` first."
             if mode not in DISCORD_MODES:
                 return False, "That operation is not available through Discord."
             job = ActiveJob(project, mode, requester_id, channel_id)
-            self.active = job
+            self.active[key] = job
             job.task = asyncio.create_task(self._run(job, project_file), name=f"scout:{project}:{mode}")
-            return True, f"Started `{mode}` for **{project}**. Use `/scout status` for progress."
+            return True, (
+                f"Started `{mode}` for **{project}** "
+                f"({len(running) + 1}/{self.bot.settings.max_concurrent_jobs} slots in use). "
+                "Use `/scout status` for progress."
+            )
 
     async def _run(self, job: ActiveJob, project_file: Path) -> None:
         def progress(event: ProgressEvent) -> None:
@@ -135,7 +161,13 @@ class JobManager:
         except Exception as exc:  # the operation layer records the failure in SQLite
             LOG.exception("Archive Scout job failed")
             message = f"<@{job.requester_id}> **{job.project}** failed: `{type(exc).__name__}: {str(exc)[:1200]}`"
-        await self.bot.send_job_message(job.channel_id, message)
+        try:
+            await self.bot.send_job_message(job.channel_id, message)
+        finally:
+            async with self._guard:
+                key = job.project.casefold()
+                if self.active.get(key) is job:
+                    self.active.pop(key, None)
 
     @staticmethod
     def _run_sync(project_file: Path, mode: str, stop_event: threading.Event, callback) -> dict:
@@ -143,13 +175,23 @@ class JobManager:
 
         return run_project(load_project_config(project_file), mode, stop_event, callback)
 
-    async def stop(self) -> bool:
+    async def stop(self, project: str = "") -> tuple[bool, str]:
         async with self._guard:
-            if not self.active or not self.active.task or self.active.task.done():
-                return False
-            self.active.stop_event.set()
-            self.active.progress = "Stop requested; waiting for the current network request to finish"
-            return True
+            running = self.running()
+            if not running:
+                return False, "No Archive Scout jobs are running."
+            if project:
+                job = self.active.get(project.casefold())
+                if not job or job not in running:
+                    return False, f"Project `{project}` is not running."
+            elif len(running) == 1:
+                job = running[0]
+            else:
+                names = ", ".join(f"`{item.project}`" for item in running)
+                return False, f"More than one job is running. Specify a project: {names}."
+            job.stop_event.set()
+            job.progress = "Stop requested; waiting for the current network request to finish"
+            return True, f"Stop requested for **{job.project}**. Saved work will remain resumable."
 
 
 class ScoutCog(commands.Cog):
@@ -180,6 +222,7 @@ class ScoutCog(commands.Cog):
         name="Short project name",
         target="Site, URL prefix, or exact URL to search",
         keywords="Comma-separated search terms",
+        additional_targets="Optional extra targets separated by semicolons",
         from_date="Beginning archive date or year, for example 2001",
         to_date="Ending archive date or year, for example 2004",
     )
@@ -189,6 +232,7 @@ class ScoutCog(commands.Cog):
         name: str,
         target: str,
         keywords: str,
+        additional_targets: str = "",
         from_date: str = "2000",
         to_date: str = "",
     ) -> None:
@@ -203,9 +247,10 @@ class ScoutCog(commands.Cog):
             rules = [item.strip() for item in keywords.split(",") if item.strip()]
             if not rules:
                 raise ValueError("Provide at least one keyword")
+            targets = parse_targets(target, additional_targets)
             config = ProjectConfig(
                 output_dir=project_dir,
-                targets=[target],
+                targets=targets,
                 keywords=rules,
                 keyword_sets=[KeywordSetConfig("Discord keywords", rules)],
                 from_date=from_date,
@@ -217,7 +262,8 @@ class ScoutCog(commands.Cog):
             await interaction.response.send_message(f"Could not create project: `{exc}`", ephemeral=True)
             return
         await interaction.response.send_message(
-            f"Created **{name}** for `{target}` with {len(rules)} keyword(s).", ephemeral=True
+            f"Created **{name}** with {len(targets)} target(s) and {len(rules)} keyword(s).",
+            ephemeral=True,
         )
 
     @scout.command(name="projects", description="List available projects")
@@ -248,20 +294,33 @@ class ScoutCog(commands.Cog):
             if current.casefold() in mode.casefold()
         ][:25]
 
-    @scout.command(name="status", description="Show the active job and its latest progress")
-    async def status(self, interaction: discord.Interaction) -> None:
+    @scout.command(name="status", description="Show running jobs and their latest progress")
+    async def status(self, interaction: discord.Interaction, project: str = "") -> None:
         if not await self.authorized(interaction):
             return
-        job = self.bot.jobs.active
-        message = job.summary() if job and job.task and not job.task.done() else "No Archive Scout job is running."
+        running = self.bot.jobs.running()
+        if project:
+            job = self.bot.jobs.active.get(project.casefold())
+            message = (
+                job.summary()
+                if job and job in running
+                else f"Project `{project}` is not currently running."
+            )
+        elif running:
+            summaries = [job.summary() for job in running]
+            message = (
+                f"Running {len(running)}/{self.bot.settings.max_concurrent_jobs} jobs:\n\n"
+                + "\n\n".join(summaries)
+            )[:1900]
+        else:
+            message = "No Archive Scout jobs are running."
         await interaction.response.send_message(message, ephemeral=True)
 
-    @scout.command(name="stop", description="Safely stop the active job")
-    async def stop(self, interaction: discord.Interaction) -> None:
+    @scout.command(name="stop", description="Safely stop a running project")
+    async def stop(self, interaction: discord.Interaction, project: str = "") -> None:
         if not await self.authorized(interaction):
             return
-        stopped = await self.bot.jobs.stop()
-        message = "Stop requested. Saved work will remain resumable." if stopped else "No job is running."
+        _, message = await self.bot.jobs.stop(project)
         await interaction.response.send_message(message, ephemeral=True)
 
     @scout.command(name="reports", description="List generated report files for a project")

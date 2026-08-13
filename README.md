@@ -3,8 +3,9 @@
 ## Run continuously on a VPS with Discord
 
 This fork includes a locked-down Discord slash-command bot and Docker deployment. It can create,
-run, resume, stop, and inspect Archive Scout projects while keeping SQLite databases, captures, and
-reports in a persistent VPS directory.
+run, resume, stop, and inspect multiple independent Archive Scout projects while keeping SQLite
+databases, captures, and reports in persistent VPS storage. Concurrent-job limits are configurable,
+and the bot prevents conflicting operations against the same project database.
 
 See [VPS and Discord deployment](docs/VPS_DISCORD.md) for the complete setup. The short version is:
 
