@@ -18,4 +18,4 @@ Platform outputs:
 
 Tagged Windows releases require the configured Artifact Signing variables/secrets. A manual build may create an unsigned Windows test package when signing is disabled; that package is not intended to substitute for an official signed tagged release.
 
-For the first official release, create tag `v1.0.0` only after the complete test matrix and native package smoke tests succeed on the exact release commit.
+For the first official release, create tag `v1.0.1` only after the complete test matrix and native package smoke tests succeed on the exact release commit.
