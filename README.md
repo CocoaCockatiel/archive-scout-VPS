@@ -1,5 +1,22 @@
 # Archive Scout
 
+## Run continuously on a VPS with Discord
+
+This fork includes a locked-down Discord slash-command bot and Docker deployment. It can create,
+run, resume, stop, and inspect Archive Scout projects while keeping SQLite databases, captures, and
+reports in a persistent VPS directory.
+
+See [VPS and Discord deployment](docs/VPS_DISCORD.md) for the complete setup. The short version is:
+
+```bash
+cp .env.example .env
+# Add your Discord bot token, server ID, and allowed operator IDs to .env.
+docker compose up -d --build
+```
+
+The bot registers `/scout` commands and the `restart: unless-stopped` policy keeps it running after
+crashes and normal VPS reboots.
+
 Archive Scout is a cross-platform desktop research workspace for indexing, downloading, searching, reviewing, reconstructing, and analyzing public captures from the Internet Archive's Wayback Machine.
 
 The official release keeps the established project-based workflow while adding AI-assisted relevance review, a substantially expanded external embedded-media pipeline, clearer site-specific Wayback diagnostics, and further large-project performance work.
