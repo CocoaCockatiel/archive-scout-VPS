@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Callable
@@ -11,7 +12,7 @@ from .cdx.indexer import index_archive
 from .analysis.workflow import run_analysis
 from .config import KeywordSetConfig, ProjectConfig, save_project_config
 from .database.connection import open_database
-from .database.repositories import (finish_scan_run, get_or_create_keyword_set, latest_scan_run, start_scan_run, start_operation_run, finish_operation_run)
+from .database.repositories import (finish_scan_run, get_or_create_keyword_set, latest_scan_run, start_scan_run, start_operation_run, finish_operation_run, update_operation_run)
 from .downloads.downloader import download_archive
 from .downloads.retry import retry_error_urls
 from .events import ConnectivityPaused, ProgressEvent, Stopped
@@ -35,6 +36,11 @@ SUPPORTED_MODES = {
     "media_all", "media_index", "media_download", "media_retry",
     "analysis", "forum_rebuild", "merge_project",
 }
+
+
+def is_recoverable_pause(exc: BaseException) -> bool:
+    """Stable integration contract for UI/bot wrappers around run_project()."""
+    return isinstance(exc, (ConnectivityPaused, RateLimitDeferred))
 
 
 def emit(callback: Callable[[ProgressEvent], None] | None, event: ProgressEvent) -> None:
@@ -118,6 +124,34 @@ def run_project(
     jobs: list[ScanJob] = []
     operation_run_id = start_operation_run(database, mode, VERSION)
     database.commit()
+    original_callback = callback
+    owner_thread_id = threading.get_ident()
+    last_progress_write = 0.0
+
+    def operation_callback(event: ProgressEvent) -> None:
+        nonlocal last_progress_write
+        if threading.get_ident() == owner_thread_id:
+            now = time.monotonic()
+            should_write = (
+                event.current is not None
+                or event.total is not None
+                or now - last_progress_write >= 0.5
+            )
+            if should_write:
+                update_operation_run(
+                    database,
+                    operation_run_id,
+                    message=event.message,
+                    completed=event.current,
+                    total=event.total,
+                    stage=event.stage,
+                )
+                database.commit()
+                last_progress_write = now
+        if original_callback:
+            original_callback(event)
+
+    callback = operation_callback
     try:
         save_project_config(config)
         if mode == "backup":
@@ -216,7 +250,7 @@ def run_project(
             database.commit()
             return paths
 
-        if mode in {"all", "external_media_after_scan"}:
+        if mode in {"all", "external_media_after_scan", "resume"}:
             index_archive(config, database, stop_event, callback)
 
         jobs = prepare_scan_jobs(database, config, mode)

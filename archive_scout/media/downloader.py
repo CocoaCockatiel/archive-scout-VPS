@@ -14,7 +14,7 @@ from ..cdx.client import HttpClient, RateLimitDeferred
 from ..config import ProjectConfig
 from ..database.repositories import blocked_site_reasons, record_error, record_site_issue, save_media_success
 from ..downloads.downloader import replay_url
-from ..downloads.rate_limit import FixedRateLimiter, SharedHostGate
+from ..downloads.rate_limit import SharedFixedRateLimiter, shared_host_gate
 from ..downloads.validation import classify_exception
 from ..content import classify_replay_content
 from ..events import ProgressEvent, Stopped
@@ -152,8 +152,8 @@ def download_media(
         if callback:
             callback(ProgressEvent("media_download", "No media captures to download.", 0, 0))
         return
-    limiter = FixedRateLimiter(config.download_delay)
-    host_gate = SharedHostGate(config.rate_limit_base_pause, config.rate_limit_max_pause)
+    limiter = SharedFixedRateLimiter(config.download_delay)
+    host_gate = shared_host_gate(config.rate_limit_base_pause, config.rate_limit_max_pause)
 
     def on_retry(attempt: int, total_attempts: int, reason: str, wait_seconds: float) -> None:
         if callback:
@@ -177,8 +177,8 @@ def download_media(
         read_timeout=config.read_timeout,
         pool_size=config.workers,
         host_gate=host_gate,
-        rate_limit_attempts=0,
-        rate_limit_max_wait=0,
+        rate_limit_attempts=config.rate_limit_attempts,
+        rate_limit_max_wait=config.rate_limit_max_wait,
         network_backend=config.network.normalized().backend,
         trust_environment=config.network.normalized().trust_environment,
         network_callback=(lambda message: callback(ProgressEvent("network", message)) if callback else None),

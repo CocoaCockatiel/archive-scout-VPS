@@ -6,6 +6,11 @@ import threading
 import time
 from dataclasses import dataclass
 
+
+_shared_rate_lock = threading.Lock()
+_shared_rate_states: dict[str, tuple[threading.Condition, list[float]]] = {}
+_shared_host_gates: dict[str, "SharedHostGate"] = {}
+
 from ..events import Stopped
 
 
@@ -34,6 +39,34 @@ class FixedRateLimiter:
     def wait(self, stop_event: threading.Event) -> None:
         with self.slot(stop_event):
             return
+
+
+class SharedFixedRateLimiter(FixedRateLimiter):
+    """Process-wide request-start spacing for one remote host.
+
+    Each client keeps its own configured delay, but all clients targeting the
+    same host advance a single shared next-request clock. This prevents several
+    simultaneous projects from multiplying traffic from one machine/VPS IP.
+    """
+
+    def __init__(self, delay: float, key: str = "web.archive.org") -> None:
+        self.delay = max(0.0, float(delay))
+        self.key = str(key or "web.archive.org").casefold()
+        with _shared_rate_lock:
+            state = _shared_rate_states.get(self.key)
+            if state is None:
+                state = (threading.Condition(), [0.0])
+                _shared_rate_states[self.key] = state
+        self.condition, self._next_request_box = state
+
+    @property
+    def next_request(self) -> float:
+        return self._next_request_box[0]
+
+    @next_request.setter
+    def next_request(self, value: float) -> None:
+        self._next_request_box[0] = float(value)
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,3 +191,35 @@ class SharedHostGate:
     def remaining(self) -> float:
         with self.condition:
             return max(0.0, self.blocked_until - time.monotonic())
+
+    def configure(self, base_pause: float, max_pause: float) -> None:
+        """Adopt the more conservative pause settings from another client."""
+        with self.condition:
+            requested_base = max(1.0, float(base_pause))
+            requested_max = max(requested_base, float(max_pause))
+            self.base_pause = max(self.base_pause, requested_base)
+            self.max_pause = max(self.max_pause, requested_max)
+
+
+def shared_host_gate(
+    base_pause: float = 30.0,
+    max_pause: float = 300.0,
+    key: str = "web.archive.org",
+) -> SharedHostGate:
+    """Return the process-wide Wayback host gate used by every project."""
+    normalized = str(key or "web.archive.org").casefold()
+    with _shared_rate_lock:
+        gate = _shared_host_gates.get(normalized)
+        if gate is None:
+            gate = SharedHostGate(base_pause, max_pause)
+            _shared_host_gates[normalized] = gate
+        else:
+            gate.configure(base_pause, max_pause)
+        return gate
+
+
+def reset_shared_traffic_state_for_tests() -> None:
+    """Test-only reset for process-wide coordinator state."""
+    with _shared_rate_lock:
+        _shared_rate_states.clear()
+        _shared_host_gates.clear()

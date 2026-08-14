@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .config import load_project_config
 from .events import ProgressEvent
-from .operations import SUPPORTED_MODES, run_project
+from .operations import SUPPORTED_MODES, is_recoverable_pause, run_project
 
 
 def main() -> None:
@@ -19,7 +19,13 @@ def main() -> None:
     def show(event: ProgressEvent) -> None:
         print(event.message, flush=True)
 
-    paths = run_project(config, args.mode, threading.Event(), show)
+    try:
+        paths = run_project(config, args.mode, threading.Event(), show)
+    except Exception as exc:
+        if is_recoverable_pause(exc):
+            print(f"PAUSED: {exc}", flush=True)
+            return
+        raise
     for name, path in paths.items():
         print(f"{name}: {path}")
 

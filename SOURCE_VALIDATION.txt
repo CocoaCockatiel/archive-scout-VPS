@@ -1,55 +1,48 @@
-Archive Scout 1.0.0 source validation
-Date: 2026-08-09
+Archive Scout 1.0.1 source validation
+Date: 2026-08-13
+
+Audit basis
+- P1 interrupted-index resume: fixed. Resume re-enters the saved CDX queue before download work.
+- P1 shared-VPS throttling: fixed in the official process. Concurrent projects now share request-start pacing and one Wayback host gate; HTTP 503 coordinates even without Retry-After.
+- P2 visible counter reset: fixed. Normal resume progress is cumulative from persisted capture states.
+- P2 safe pauses reported as failures by Discord: the Discord fork is not part of the official repository. Archive Scout 1.0.1 now persists operation progress/status and exposes is_recoverable_pause() so wrappers can classify saved pauses without treating them as crashes.
 
 Automated validation
-- 147 automated tests completed successfully.
+- 155 automated tests completed successfully.
 - 1 display-dependent theme test was skipped because no graphical display is available in this environment.
+- 8 dedicated v1.0.1 audit regression tests passed.
 - Python compilation completed for archive_scout, tests, and scripts.
 - .github/workflows/tests.yml parsed successfully as YAML.
 - .github/workflows/build-and-release.yml parsed successfully as YAML.
 - scripts/build_linux.sh passed bash syntax validation.
 - scripts/build_macos.sh passed bash syntax validation.
-- Python wheel packaging completed successfully as archive_scout-1.0.0-py3-none-any.whl using the installed build backend.
-- Public application/package version is 1.0.0.
-- Database schema version is 6 with migration coverage from schema version 5.
+- Python wheel packaging completed successfully as archive_scout-1.0.1-py3-none-any.whl using pip --no-build-isolation.
+- Public application/package version is 1.0.1.
+- Database schema remains version 6; no project migration is required from 1.0.0.
 
-AI relevance validation
-- AI relevance operates on matches from an existing deterministic scan and does not replace or mutate Archive Scout scores.
-- Project configuration round-trips AI settings without storing an API key.
-- Missing API keys fail before an AI run is created.
-- The OpenAI request contract is tested with store=false, strict JSON-schema output, exact candidate IDs, and explicit archived-content prompt-injection isolation.
-- Mocked AI results persist independently and export to CSV, JSON, and Markdown.
-- No live OpenAI API request was made during source validation.
+Network/recovery validation
+- Headerless HTTP 503 enters the coordinated Wayback host pause and can defer safely after the configured budget.
+- Shared request pacing coordinates independent clients in the same process.
+- Shared host-gate identity is process-wide and adopts conservative pause settings.
+- Legacy zero pause budgets normalize to finite safety defaults: 15 minutes and 8 coordinated incidents.
+- Resume invokes index_archive before download_archive, allowing the exact persisted CDX queue to continue.
+- Recoverable ConnectivityPaused and RateLimitDeferred states are distinguishable through is_recoverable_pause().
 
-External embedded-media validation
-- Modern lazy image attributes, srcset, video/source/poster tags, social metadata, preload hints, CSS/background URLs, legacy player configuration, and Wayback replay URL unwrapping are covered.
-- External-media discovery is persistent by source-document content hash, so unchanged pages are not reparsed on repeat runs.
-- Exact external-media CDX lookups use a persistent queue and bounded concurrency.
-- The dedicated external-media workflow defines external hosts relative to the site actually indexed and scanned, not optional direct-media targets.
-- Known Wayback-excluded or robots-blocked hosts are short-circuited instead of repeatedly queried.
-- Media downloads retain direct-to-disk streaming and incremental hashing.
+Progress validation
+- Cumulative progress is derived from persisted capture states plus the remaining disk-backed queue.
+- operation_runs.progress_json is updated from owner-thread progress events for external integrations.
+- Existing 1.0 AI relevance, external embedded-media, scanning, reports, recovery, and analysis tests remain green.
 
-Site issue validation
-- Wayback exclusion, robots restrictions, missing captures, invalid replay responses, access restrictions, rate limits, timeouts, connection failures, TLS failures, and server errors have distinct classifications where evidence permits.
-- Repeated host/stage issues are deduplicated with occurrence counts.
-- Confirmed exclusion/robots conditions can act as host-level circuits while unrelated targets continue.
-
-Offline performance validation
-100,000-row profile:
-- 100,000 CDX rows parsed in 2.233 seconds.
-- Parse-and-upsert completed in 4.394 seconds.
+Offline 100,000-row performance validation
+- CDX rows parsed: 100,000 in 5.716 seconds.
+- Parse-and-upsert: 11.190 seconds.
 - Repeating the same 100,000-row index produced 0 unchanged-row database writes.
 - Parser peak traced memory: 23,847,113 bytes.
-- HTTP attempts: 0.
-
-1,000,000-row parser profile:
-- 1,000,000 CDX rows parsed in 21.330 seconds.
-- Parser peak traced memory: 24,047,119 bytes.
 - HTTP attempts: 0.
 
 Release limitations
 - Native Windows, macOS, and Linux distributable packages were not produced in this Linux validation environment.
 - Real code-signing/notarization transactions were not performed.
-- A live Internet Archive stress test was not performed.
-- A live OpenAI API relevance request was not performed because validation does not include a user API key.
-- Native GitHub Actions builds and smoke tests should complete successfully before the v1.0.0 tag is published.
+- A live Internet Archive/VPS concurrency stress test was not performed.
+- The separate Discord VPS fork was not included in the 1.0.0 official repository, so its discord_bot.py was not directly modified here.
+- Native GitHub Actions builds and smoke tests should complete successfully before publishing v1.0.1.

@@ -225,8 +225,8 @@ class ProjectConfig:
     retries: int = 4
     rate_limit_base_pause: float = 30.0
     rate_limit_max_pause: float = 300.0
-    rate_limit_max_wait: float = 0.0
-    rate_limit_attempts: int = 0
+    rate_limit_max_wait: float = 900.0
+    rate_limit_attempts: int = 8
     connect_timeout: float = 30.0
     read_timeout: float = 180.0
     max_attempts: int = 4
@@ -330,8 +330,8 @@ class ProjectConfig:
             retries=min(12, max(1, int(self.retries))),
             rate_limit_base_pause=max(1.0, float(self.rate_limit_base_pause)),
             rate_limit_max_pause=max(float(self.rate_limit_base_pause), float(self.rate_limit_max_pause)),
-            rate_limit_max_wait=max(0.0, float(self.rate_limit_max_wait)),
-            rate_limit_attempts=min(1000, max(0, int(self.rate_limit_attempts))),
+            rate_limit_max_wait=(900.0 if float(self.rate_limit_max_wait) <= 0 else max(30.0, float(self.rate_limit_max_wait))),
+            rate_limit_attempts=(8 if int(self.rate_limit_attempts) <= 0 else min(1000, int(self.rate_limit_attempts))),
             connect_timeout=max(1.0, float(self.connect_timeout)),
             read_timeout=max(1.0, float(self.read_timeout)),
             max_attempts=min(20, max(1, int(self.max_attempts))),
@@ -441,8 +441,8 @@ def load_project_config(path: Path) -> ProjectConfig:
         retries=int(payload.get("retries", 4)),
         rate_limit_base_pause=float(payload.get("rate_limit_base_pause", 30.0)),
         rate_limit_max_pause=float(payload.get("rate_limit_max_pause", 300.0)),
-        rate_limit_max_wait=float(payload.get("rate_limit_max_wait", 0.0)),
-        rate_limit_attempts=int(payload.get("rate_limit_attempts", 0)),
+        rate_limit_max_wait=float(payload.get("rate_limit_max_wait", 900.0)),
+        rate_limit_attempts=int(payload.get("rate_limit_attempts", 8)),
         connect_timeout=float(payload.get("connect_timeout", 30.0)),
         read_timeout=float(payload.get("read_timeout", 180.0)),
         max_attempts=int(payload.get("max_attempts", 4)),

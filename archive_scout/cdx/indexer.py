@@ -12,7 +12,7 @@ from typing import Callable
 
 from ..config import ProjectConfig
 from ..database.repositories import get_or_create_target, record_error, record_site_issue, upsert_captures
-from ..downloads.rate_limit import FixedRateLimiter, SharedHostGate
+from ..downloads.rate_limit import SharedFixedRateLimiter, shared_host_gate
 from ..events import ConnectivityPaused, ProgressEvent, Stopped
 from ..site_status import host_from_url, site_issue_message
 from ..utils import utc_now
@@ -468,8 +468,8 @@ def _client_for_config(
     callback: Callable[[ProgressEvent], None] | None,
 ) -> HttpClient:
     network = config.network.normalized()
-    limiter = FixedRateLimiter(config.cdx_delay)
-    host_gate = SharedHostGate(config.rate_limit_base_pause, config.rate_limit_max_pause)
+    limiter = SharedFixedRateLimiter(config.cdx_delay)
+    host_gate = shared_host_gate(config.rate_limit_base_pause, config.rate_limit_max_pause)
 
     def on_retry(attempt: int, total: int, reason: str, wait_seconds: float) -> None:
         if "all Wayback requests paused" in reason:
@@ -498,8 +498,8 @@ def _client_for_config(
         read_timeout=min(max(config.read_timeout, 30.0), 120.0),
         pool_size=network.cdx_workers,
         host_gate=host_gate,
-        rate_limit_attempts=0,
-        rate_limit_max_wait=0,
+        rate_limit_attempts=config.rate_limit_attempts,
+        rate_limit_max_wait=config.rate_limit_max_wait,
         network_backend=network.backend,
         trust_environment=network.trust_environment,
         network_callback=on_network,

@@ -49,7 +49,7 @@ from ..database.repositories import (
     upsert_media_capture,
     upsert_media_captures,
 )
-from ..downloads.rate_limit import FixedRateLimiter, SharedHostGate
+from ..downloads.rate_limit import SharedFixedRateLimiter, shared_host_gate
 from ..downloads.validation import classify_exception
 from ..events import ConnectivityPaused, ProgressEvent, Stopped
 from ..utils import json_value, parse_cdx_parameter_lines, utc_now
@@ -1303,8 +1303,8 @@ def index_external_embedded_media(
     if not selected_extensions(config.media):
         raise ValueError("no image or video extensions remain after include/exclude filtering")
     signature = media_query_signature(config)
-    limiter = FixedRateLimiter(config.cdx_delay)
-    host_gate = SharedHostGate(config.rate_limit_base_pause, config.rate_limit_max_pause)
+    limiter = SharedFixedRateLimiter(config.cdx_delay)
+    host_gate = shared_host_gate(config.rate_limit_base_pause, config.rate_limit_max_pause)
 
     def on_retry(attempt: int, total: int, reason: str, wait_seconds: float) -> None:
         if callback:
@@ -1326,8 +1326,8 @@ def index_external_embedded_media(
         read_timeout=min(max(config.read_timeout, 30.0), 120.0),
         pool_size=config.network.normalized().cdx_workers,
         host_gate=host_gate,
-        rate_limit_attempts=0,
-        rate_limit_max_wait=0,
+        rate_limit_attempts=config.rate_limit_attempts,
+        rate_limit_max_wait=config.rate_limit_max_wait,
         network_backend=config.network.normalized().backend,
         trust_environment=config.network.normalized().trust_environment,
         network_callback=(lambda message: callback(ProgressEvent("network", message)) if callback else None),
@@ -1356,8 +1356,8 @@ def index_media(
         raise ValueError("no image or video extensions remain after include/exclude filtering")
     signature = media_query_signature(config)
     state_signature = media_index_state_signature(config)
-    limiter = FixedRateLimiter(config.cdx_delay)
-    host_gate = SharedHostGate(config.rate_limit_base_pause, config.rate_limit_max_pause)
+    limiter = SharedFixedRateLimiter(config.cdx_delay)
+    host_gate = shared_host_gate(config.rate_limit_base_pause, config.rate_limit_max_pause)
 
     def on_retry(attempt: int, total: int, reason: str, wait_seconds: float) -> None:
         if callback:
@@ -1384,8 +1384,8 @@ def index_media(
         read_timeout=min(max(config.read_timeout, 30.0), 120.0),
         pool_size=config.network.normalized().cdx_workers,
         host_gate=host_gate,
-        rate_limit_attempts=0,
-        rate_limit_max_wait=0,
+        rate_limit_attempts=config.rate_limit_attempts,
+        rate_limit_max_wait=config.rate_limit_max_wait,
         network_backend=config.network.normalized().backend,
         trust_environment=config.network.normalized().trust_environment,
         network_callback=(lambda message: callback(ProgressEvent("network", message)) if callback else None),
