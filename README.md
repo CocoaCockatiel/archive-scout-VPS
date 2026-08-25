@@ -2,13 +2,7 @@
 
 Archive Scout is a cross-platform desktop research workspace for indexing, downloading, searching, reviewing, reconstructing, and analyzing public captures from the Internet Archive's Wayback Machine.
 
-The official release keeps the established project-based workflow while adding AI-assisted relevance review, a substantially expanded external embedded-media pipeline, clearer site-specific Wayback diagnostics, and further large-project performance work.
-
-## Downloads
-
-- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.1/ArchiveScout-Windows-x64.zip)
-- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.1/ArchiveScout-Linux-x64.zip)
-- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.1/ArchiveScout-macOS-Universal.zip)
+Archive Scout 1.0.2 keeps the established project-based workflow while adding Research Intelligence, much faster broad CDX pagination, an automation-grade CLI, provider-neutral OpenAI/OpenRouter support, and the reliability/media improvements from 1.0.1 and 1.0.0.
 
 ## Core workflow
 
@@ -21,11 +15,27 @@ A typical research project follows this sequence:
 5. Download textual captures with bounded, rate-limited workers.
 6. Parse and scan downloaded pages locally.
 7. Review, search, filter, tag, and export matching pages.
-8. Optionally ask the AI relevance reviewer to rank report matches for a natural-language research goal.
-9. Optionally discover, resolve, and download archived images and videos embedded by the scanned pages.
-10. Use recovery, comparison, forum reconstruction, provenance, diagnostics, and project-management tools as needed.
+8. Build or refresh the local Research Intelligence index and search the whole project with natural-language research questions.
+9. Optionally ask the AI relevance/deep-review layer to rank or synthesize a bounded set of evidence with document-ID citations.
+10. Optionally discover, resolve, and download archived images and videos embedded by the scanned pages.
+11. Use recovery, comparison, forum reconstruction, provenance, diagnostics, and project-management tools as needed.
 
 Archive Scout stores project state in SQLite so long jobs can be stopped and resumed without starting over.
+
+## Research Intelligence
+
+Archive Scout 1.0.2 treats a completed project as one evidence corpus. The local research index combines full-text evidence, compact vectors, extracted entities/identifiers, duplicate clusters, deterministic Archive Scout scores, hyperlinks, provenance relationships, reconstructed forum relationships, and capture timestamps.
+
+The **Research intelligence** tab can:
+
+- search concepts across the saved project rather than only one scan run;
+- surface near-duplicate/reposted material without letting copies dominate the ranking;
+- extract domains, URLs, filenames, dates, hashes, email addresses, and username-like identifiers;
+- expose an evidence graph and chronological relationship timeline for each result;
+- preserve the distinction between archive evidence, deterministic Archive Scout scoring, and AI interpretation;
+- run an optional deep AI review over only the strongest bounded evidence set, rejecting model claims that cite document IDs not supplied to the model.
+
+The built-in `local-hash` backend is dependency-free and private. Source installations can optionally install the `research` extra and select `fastembed` for a neural local embedding backend. AI is not required for ordinary Research Intelligence search.
 
 ## AI relevance review
 
@@ -36,17 +46,17 @@ After a scan has produced a report, enter a natural-language description of what
 - selects a bounded set of existing report matches;
 - gives prompt-relevant full-text candidates first consideration and fills the remaining candidate budget from the normal Archive Scout ranking;
 - sends compact page evidence rather than complete project archives;
-- asks the OpenAI Responses API for a structured relevance score, confidence value, category, short reason, and evidence summary;
+- asks the selected provider for a structured relevance score, confidence value, category, short reason, and evidence summary;
 - stores the AI ranking separately from the original match and review records;
 - generates CSV, JSON, and Markdown AI relevance reports.
 
-The default model is `gpt-5-mini`. The model name, candidate count, batching, excerpt size, and minimum displayed relevance can be adjusted in the interface.
+OpenAI (`gpt-5-mini` by default) and OpenRouter are supported through separate provider adapters behind the same internal interface. The provider/model, candidate count, batching, excerpt size, and minimum displayed relevance can be adjusted in the interface.
 
 ### API key and privacy
 
-Archive Scout does not bundle an API key. Enter your own OpenAI API key in the AI relevance page or provide `OPENAI_API_KEY` in the launch environment. A key typed into the application is session-only and is not written to `project.json` or application settings.
+Archive Scout does not bundle an API key. Enter a session-only key in the AI page, or provide `OPENAI_API_KEY` / `OPENROUTER_API_KEY` in the launch environment. Source checkouts may use an ignored `.env` file. Keys are never written to `project.json`, SQLite, reports, diagnostics, or application settings.
 
-AI review is opt-in. Normal indexing, downloading, scanning, reports, and media workflows do not require OpenAI. When AI review is run, the research prompt and selected page excerpts are sent to the OpenAI API. Archive Scout requests non-stored Responses and instructs the model to treat archived page content as untrusted source material rather than instructions.
+AI review is opt-in. Normal indexing, downloading, scanning, reports, media workflows, and local Research Intelligence search do not require an AI provider. When AI is run, only the research prompt and bounded page excerpts are sent to the selected provider. The OpenAI adapter requests non-stored Responses; all adapters instruct the model to treat archived page content as hostile/untrusted source material rather than instructions.
 
 ## External embedded media
 
@@ -133,6 +143,16 @@ The execution engine is designed around bounded work rather than project-sized i
 
 The offline benchmark runner can exercise large CDX parsing, database insertion, result pagination, keyword matching, and no-op repeated indexing without contacting the Internet Archive.
 
+### Faster broad CDX indexing in 1.0.2
+
+Older Archive Scout defaults forced broad paginated CDX queries to `pageSize=9`, which could turn very large sites into thousands of page requests. 1.0.2 omits that artificial small page size by default and uses the CDX server's configured large page grouping, while limiting the number of large page bodies held concurrently. Explicit smaller `pageSize` values remain available for troubleshooting constrained systems. Resume-key indexing is unchanged for queries where it is the safer strategy.
+
+## Automation and bot compatibility
+
+The release packages a separate `ArchiveScoutCLI` console executable alongside the GUI. The CLI supports noninteractive project creation, run/resume, status, deterministic results, errors/site issues, Research Intelligence search/indexing, AI review, and grounded research. `text`, `json`, and streaming `jsonl` formats are available, with stable exit codes and graceful Ctrl+C handling. Read-only status/search/results/errors commands open SQLite in query-only mode. See `docs/AUTOMATION.md`.
+
+Bot support is an interface layer over the same engine and is not executed by the normal GUI hot path.
+
 ## Project safety and recovery
 
 Projects are self-contained folders. Archive Scout can:
@@ -151,15 +171,15 @@ Existing supported project databases are upgraded in place to the current schema
 
 ### Windows
 
-Download `ArchiveScout-Windows-x64.zip`, verify its checksum, extract it, and run `ArchiveScout.exe`. Tagged official releases are intended to use the repository's configured Windows Artifact Signing workflow.
+Download `ArchiveScout-Windows-x64.zip`, verify its checksum, extract it, and run `ArchiveScout.exe`. The archive also contains `ArchiveScoutCLI\ArchiveScoutCLI.exe` for automation. Tagged official releases are intended to use the repository's configured Windows Artifact Signing workflow.
 
 ### macOS
 
-Download `ArchiveScout-macOS-Universal.zip`, extract it completely, move `Archive Scout.app` to Applications, and open it. The packaging script preserves symlinks, verifies the frozen runtime, performs a startup probe, and validates the packaged application before publication.
+Download `ArchiveScout-macOS-Universal.zip`, extract it completely, move `Archive Scout.app` to Applications, and open it. The ZIP also contains the universal `ArchiveScoutCLI` executable. The packaging script preserves symlinks, verifies the frozen runtime, performs a startup probe, and validates the packaged application before publication.
 
 ### Linux
 
-Download `ArchiveScout-Linux-x64.tar.gz`, extract it, and run the included application or install it with the provided user-local installer.
+Download `ArchiveScout-Linux-x64.tar.gz`, extract it, and run the included application or install it with the provided user-local installer. The installer maps `archive-scout` to the packaged CLI and keeps the GUI in the desktop application menu.
 
 ## Source development
 

@@ -1,48 +1,67 @@
-Archive Scout 1.0.1 source validation
-Date: 2026-08-13
+Archive Scout 1.0.2 source validation
+Date: 2026-08-24
 
-Audit basis
-- P1 interrupted-index resume: fixed. Resume re-enters the saved CDX queue before download work.
-- P1 shared-VPS throttling: fixed in the official process. Concurrent projects now share request-start pacing and one Wayback host gate; HTTP 503 coordinates even without Retry-After.
-- P2 visible counter reset: fixed. Normal resume progress is cumulative from persisted capture states.
-- P2 safe pauses reported as failures by Discord: the Discord fork is not part of the official repository. Archive Scout 1.0.1 now persists operation progress/status and exposes is_recoverable_pause() so wrappers can classify saved pauses without treating them as crashes.
+Release scope
+- Research Intelligence: persistent local evidence index, hybrid retrieval, entity/identifier extraction, duplicate/provenance/forum relationships, timelines, and citation-grounded optional AI deep review.
+- Faster broad indexing: removed the legacy forced pageSize=9 default, preserved explicit custom page grouping, and bounded concurrent large CDX response bodies.
+- Automation: packaged CLI contract with init/run/status/search/results/errors/research-index/research/ai-review, text/json/jsonl output, stable exit codes, graceful interruption, and query-only read commands.
+- AI providers: provider-neutral OpenAI Responses and OpenRouter adapters; credentials remain external to project/database/report state.
+- Release hygiene: active .gitignore and .github paths, ignored .env files, separate ArchiveScoutCLI build on Windows/Linux/macOS.
 
 Automated validation
-- 155 automated tests completed successfully.
+- 168 automated tests completed successfully.
 - 1 display-dependent theme test was skipped because no graphical display is available in this environment.
-- 8 dedicated v1.0.1 audit regression tests passed.
-- Python compilation completed for archive_scout, tests, and scripts.
+- Schema migration v6 -> v7 passed together with all earlier migration tests.
+- Python compilation completed for archive_scout, tests, scripts, run_app.py, and run_cli.py.
 - .github/workflows/tests.yml parsed successfully as YAML.
 - .github/workflows/build-and-release.yml parsed successfully as YAML.
 - scripts/build_linux.sh passed bash syntax validation.
 - scripts/build_macos.sh passed bash syntax validation.
-- Python wheel packaging completed successfully as archive_scout-1.0.1-py3-none-any.whl using pip --no-build-isolation.
-- Public application/package version is 1.0.1.
-- Database schema remains version 6; no project migration is required from 1.0.0.
+- Source CLI smoke test passed for noninteractive init and read-only JSON status.
+- Python wheel packaging completed successfully as archive_scout-1.0.2-py3-none-any.whl using pip --no-build-isolation.
+- The final repository ZIP was extracted into a clean directory and the complete 168-test suite, CLI help smoke test, version check, and schema check passed from the extracted artifact.
+- Public application/package version is 1.0.2.
+- Database schema version is 7.
 
-Network/recovery validation
-- Headerless HTTP 503 enters the coordinated Wayback host pause and can defer safely after the configured budget.
-- Shared request pacing coordinates independent clients in the same process.
-- Shared host-gate identity is process-wide and adopts conservative pause settings.
-- Legacy zero pause budgets normalize to finite safety defaults: 15 minutes and 8 coordinated incidents.
-- Resume invokes index_archive before download_archive, allowing the exact persisted CDX queue to continue.
-- Recoverable ConnectivityPaused and RateLimitDeferred states are distinguishable through is_recoverable_pause().
+Research Intelligence / AI validation
+- Incremental local research indexing, retrieval, entity extraction, graph relationships, and grounded deep review tests passed.
+- Unsupported/unknown AI citation document IDs are rejected.
+- Existing deterministic scores and human review state remain authoritative and separate from AI output.
+- OpenAI adapter tests verify non-stored strict Responses output.
+- OpenRouter transport remains isolated behind the provider adapter.
+- Provider credentials are not required in project files and are never persisted by the project configuration layer.
+- No live OpenAI/OpenRouter request was made during source validation.
 
-Progress validation
-- Cumulative progress is derived from persisted capture states plus the remaining disk-backed queue.
-- operation_runs.progress_json is updated from owner-thread progress events for external integrations.
-- Existing 1.0 AI relevance, external embedded-media, scanning, reports, recovery, and analysis tests remain green.
+Indexing validation
+- Broad paging uses server-selected large page grouping by default instead of forcing pageSize=9.
+- Explicit smaller page grouping remains supported for constrained/troubleshooting use.
+- Untouched 1.0.1 page_blocks=9 defaults upgrade to the new fast default while deliberately customized values are preserved.
+- Concurrent large CDX response bodies are capped to prevent the indexing speedup from becoming a memory spike.
+- Existing page-count, resume-key, year-window fallback, interrupted-index resume, shared Wayback pacing, headerless 503 coordination, and site-issue behavior remain covered and green.
+
+Bot/automation validation
+- ProgressEvent has a stable serializable machine shape.
+- JSON/JSONL automation commands are covered by regression tests.
+- status/search/results/errors read paths use SQLite query-only behavior.
+- CLI init/status source smoke test produced parseable JSON.
+- Build scripts and build workflow package/verify a separate ArchiveScoutCLI executable alongside the GUI on all three supported platforms.
 
 Offline 100,000-row performance validation
-- CDX rows parsed: 100,000 in 5.716 seconds.
-- Parse-and-upsert: 11.190 seconds.
+- 100,000 CDX rows parsed in 2.271 seconds.
+- Parse-and-upsert completed in 4.630 seconds.
 - Repeating the same 100,000-row index produced 0 unchanged-row database writes.
 - Parser peak traced memory: 23,847,113 bytes.
 - HTTP attempts: 0.
 
-Release limitations
-- Native Windows, macOS, and Linux distributable packages were not produced in this Linux validation environment.
-- Real code-signing/notarization transactions were not performed.
-- A live Internet Archive/VPS concurrency stress test was not performed.
-- The separate Discord VPS fork was not included in the 1.0.0 official repository, so its discord_bot.py was not directly modified here.
-- Native GitHub Actions builds and smoke tests should complete successfully before publishing v1.0.1.
+Offline 1,000,000-row parser validation
+- 1,000,000 CDX rows parsed in 22.473 seconds.
+- Parser peak traced memory: 24,047,119 bytes.
+- HTTP attempts: 0.
+
+Release limitations / remaining gates
+- Native Windows, macOS, and Linux distributable binaries were not produced in this container because PyInstaller is not installed here.
+- Build definitions were validated locally; GitHub Actions must produce and smoke-test the actual native GUI and ArchiveScoutCLI packages.
+- Real Windows signing, macOS signing/notarization, and release upload transactions were not performed.
+- A live Internet Archive large-site stress test was not performed; offline deterministic benchmarks do not measure Wayback server behavior.
+- A live external AI provider request was not performed because source validation does not use user credentials.
+- Publish tag v1.0.2 only after the GitHub Actions test matrix and native package smoke tests pass on the exact release commit.
