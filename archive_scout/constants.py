@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-VERSION = "1.0.1"
-SCHEMA_VERSION = 6
+VERSION = "1.0.2"
+SCHEMA_VERSION = 7
 APP_NAME = "Archive Scout"
 CDX_URL = "https://web.archive.org/cdx/search/cdx"
 CDX_TIMEMAP_URL = "https://web.archive.org/web/timemap/cdx"
@@ -56,6 +56,7 @@ OPERATION_MODES = {
     "Download pending media": "media_download",
     "Retry only errored media": "media_retry",
     "Run archive recovery and analysis": "analysis",
+    "Build or refresh Research Intelligence": "research_index",
     "Rebuild forum threads only": "forum_rebuild",
     "Merge another Archive Scout project": "merge_project",
 }

@@ -780,16 +780,17 @@ def start_ai_run(
     candidate_count: int,
     minimum_relevance: int,
     metadata: dict | None = None,
+    provider: str = "openai",
 ) -> int:
     cursor = database.execute(
         """
         INSERT INTO ai_runs(
             scan_run_id,prompt,provider,model,status,candidate_count,result_count,
             minimum_relevance,started_at,metadata_json
-        ) VALUES(?,?,'openai',?,'running',?,0,?,?,?)
+        ) VALUES(?,?,?,?,'running',?,0,?,?,?)
         """,
         (
-            int(scan_run_id), prompt.strip(), model.strip(), int(candidate_count),
+            int(scan_run_id), prompt.strip(), provider.strip().casefold() or "openai", model.strip(), int(candidate_count),
             int(minimum_relevance), utc_now(), json.dumps(metadata or {}, ensure_ascii=False),
         ),
     )

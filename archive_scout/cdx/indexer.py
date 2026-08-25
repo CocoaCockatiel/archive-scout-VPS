@@ -571,7 +571,10 @@ def _request_paged_batch(
         lambda page: build_paged_cdx_params(config, target, current.start, current.end, page, current.page_blocks),
         stop_event,
         workers=page_workers,
-        max_bytes=max(64 * 1024 * 1024, current.page_blocks * 12 * 1024 * 1024),
+        # Server-sized pages can contain far more ZipNum blocks than the old
+        # pageSize=9 transport. Keep a generous per-response safety ceiling while
+        # concurrency is independently capped by effective_page_workers().
+        max_bytes=(192 * 1024 * 1024 if current.page_blocks <= 0 else max(64 * 1024 * 1024, current.page_blocks * 12 * 1024 * 1024)),
     ):
         if result.succeeded and consume_success is not None:
             consume_success(result)

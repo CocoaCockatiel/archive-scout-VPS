@@ -456,6 +456,110 @@ CREATE TABLE IF NOT EXISTS site_issues(
     UNIQUE(host,stage,category,http_status)
 );
 CREATE INDEX IF NOT EXISTS site_issues_open_idx ON site_issues(resolved,last_seen,host);
+
+CREATE TABLE IF NOT EXISTS research_vectors(
+    document_id INTEGER PRIMARY KEY,
+    content_hash TEXT NOT NULL,
+    backend TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    vector_blob BLOB NOT NULL,
+    norm REAL NOT NULL DEFAULT 1.0,
+    token_count INTEGER NOT NULL DEFAULT 0,
+    indexed_at TEXT NOT NULL,
+    FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS research_vectors_backend_idx ON research_vectors(backend,indexed_at,document_id);
+CREATE TABLE IF NOT EXISTS research_vector_bands(
+    document_id INTEGER NOT NULL,
+    band INTEGER NOT NULL,
+    bucket TEXT NOT NULL,
+    PRIMARY KEY(document_id,band),
+    FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS research_vector_band_idx ON research_vector_bands(band,bucket,document_id);
+CREATE TABLE IF NOT EXISTS research_entities(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    value TEXT NOT NULL,
+    normalized TEXT NOT NULL,
+    UNIQUE(kind,normalized)
+);
+CREATE INDEX IF NOT EXISTS research_entities_value_idx ON research_entities(normalized,kind);
+CREATE TABLE IF NOT EXISTS research_document_entities(
+    document_id INTEGER NOT NULL,
+    entity_id INTEGER NOT NULL,
+    occurrence_count INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY(document_id,entity_id),
+    FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE,
+    FOREIGN KEY(entity_id) REFERENCES research_entities(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS research_document_entities_entity_idx ON research_document_entities(entity_id,document_id);
+CREATE TABLE IF NOT EXISTS research_edges(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_document_id INTEGER NOT NULL,
+    target_document_id INTEGER NOT NULL,
+    edge_type TEXT NOT NULL,
+    weight REAL NOT NULL DEFAULT 1.0,
+    evidence TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(source_document_id,target_document_id,edge_type),
+    FOREIGN KEY(source_document_id) REFERENCES documents(id) ON DELETE CASCADE,
+    FOREIGN KEY(target_document_id) REFERENCES documents(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS research_edges_source_idx ON research_edges(source_document_id,edge_type,id);
+CREATE INDEX IF NOT EXISTS research_edges_target_idx ON research_edges(target_document_id,edge_type,id);
+CREATE TABLE IF NOT EXISTS research_queries(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query TEXT NOT NULL,
+    backend TEXT NOT NULL,
+    result_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_query_results(
+    query_id INTEGER NOT NULL,
+    document_id INTEGER NOT NULL,
+    rank INTEGER NOT NULL,
+    score REAL NOT NULL,
+    vector_score REAL NOT NULL DEFAULT 0,
+    text_score REAL NOT NULL DEFAULT 0,
+    entity_score REAL NOT NULL DEFAULT 0,
+    archive_score REAL NOT NULL DEFAULT 0,
+    explanation_json TEXT,
+    PRIMARY KEY(query_id,document_id),
+    FOREIGN KEY(query_id) REFERENCES research_queries(id) ON DELETE CASCADE,
+    FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS research_query_rank_idx ON research_query_results(query_id,rank,document_id);
+CREATE TABLE IF NOT EXISTS research_ai_runs(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    input_document_ids_json TEXT,
+    input_hashes_json TEXT,
+    output_json TEXT,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    estimated_cost REAL,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    error_message TEXT
+);
+CREATE INDEX IF NOT EXISTS research_ai_runs_created_idx ON research_ai_runs(created_at,id DESC);
+CREATE TABLE IF NOT EXISTS research_ai_claims(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ai_run_id INTEGER NOT NULL,
+    claim_text TEXT NOT NULL,
+    support_document_ids_json TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0,
+    uncertainty TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(ai_run_id) REFERENCES research_ai_runs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS research_ai_claims_run_idx ON research_ai_claims(ai_run_id,id);
+
 CREATE TABLE IF NOT EXISTS project_merges(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_path TEXT NOT NULL,
@@ -521,6 +625,11 @@ def migrate_v5_to_v6(database: sqlite3.Connection) -> None:
     database.execute("UPDATE schema_info SET version=6")
 
 
+def migrate_v6_to_v7(database: sqlite3.Connection) -> None:
+    database.executescript(BASE_SCHEMA_SQL)
+    database.execute("UPDATE schema_info SET version=7")
+
+
 def initialize_schema(database: sqlite3.Connection) -> None:
     database.execute("PRAGMA foreign_keys=ON")
     has_schema = database.execute(
@@ -538,15 +647,21 @@ def initialize_schema(database: sqlite3.Connection) -> None:
             migrate_v3_to_v4(database)
             migrate_v4_to_v5(database)
             migrate_v5_to_v6(database)
+            migrate_v6_to_v7(database)
         elif version == 3:
             migrate_v3_to_v4(database)
             migrate_v4_to_v5(database)
             migrate_v5_to_v6(database)
+            migrate_v6_to_v7(database)
         elif version == 4:
             migrate_v4_to_v5(database)
             migrate_v5_to_v6(database)
+            migrate_v6_to_v7(database)
         elif version == 5:
             migrate_v5_to_v6(database)
+            migrate_v6_to_v7(database)
+        elif version == 6:
+            migrate_v6_to_v7(database)
         elif version != SCHEMA_VERSION:
             raise RuntimeError(f"unsupported Archive Scout schema version: {version}")
         else:
