@@ -8,6 +8,7 @@ $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
 $Executable = Join-Path $PWD "dist\ArchiveScout\ArchiveScout.exe"
+$CLIExecutable = Join-Path $PWD "dist\ArchiveScoutCLI\ArchiveScoutCLI.exe"
 
 if (-not $SkipBuild) {
     Remove-Item build,dist -Recurse -Force -ErrorAction SilentlyContinue
@@ -29,18 +30,38 @@ if (-not $SkipBuild) {
         --collect-all urllib3 `
         --collect-all httpx `
         --collect-all httpcore `
+        --collect-all dotenv `
         run_app.py
+    python -m PyInstaller `
+        --noconfirm `
+        --clean `
+        --console `
+        --onedir `
+        --noupx `
+        --name ArchiveScoutCLI `
+        --version-file packaging/windows/version_info.txt `
+        --collect-all truststore `
+        --collect-all urllib3 `
+        --collect-all httpx `
+        --collect-all httpcore `
+        --collect-all dotenv `
+        run_cli.py
 }
 
 if (-not (Test-Path $Executable)) {
     throw "ArchiveScout.exe was not built at $Executable"
 }
+if (-not (Test-Path $CLIExecutable)) {
+    throw "ArchiveScoutCLI.exe was not built at $CLIExecutable"
+}
 
 if ($RequireSigned) {
-    $Signature = Get-AuthenticodeSignature $Executable
-    $Signature | Format-List Status,StatusMessage,SignerCertificate,TimeStamperCertificate,Path
-    if ($Signature.Status -ne "Valid") {
-        throw "ArchiveScout.exe must have a valid Authenticode signature before packaging. Current status: $($Signature.Status)"
+    foreach ($Target in @($Executable, $CLIExecutable)) {
+        $Signature = Get-AuthenticodeSignature $Target
+        $Signature | Format-List Status,StatusMessage,SignerCertificate,TimeStamperCertificate,Path
+        if ($Signature.Status -ne "Valid") {
+            throw "$Target must have a valid Authenticode signature before packaging. Current status: $($Signature.Status)"
+        }
     }
 }
 
@@ -54,6 +75,7 @@ $Package = Join-Path $PWD "release\ArchiveScout-Windows-x64"
 Remove-Item $Package -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $Package | Out-Null
 Copy-Item dist\ArchiveScout $Package\ArchiveScout -Recurse
+Copy-Item dist\ArchiveScoutCLI $Package\ArchiveScoutCLI -Recurse
 Copy-Item packaging\windows\install.ps1 $Package
 Copy-Item 'packaging\windows\Install Archive Scout.cmd' $Package
 Copy-Item packaging\windows\uninstall.ps1 $Package

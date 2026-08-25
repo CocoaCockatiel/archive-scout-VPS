@@ -1,10 +1,17 @@
 $ErrorActionPreference = "Stop"
 $Source = Join-Path $PSScriptRoot "ArchiveScout"
+$CLISource = Join-Path $PSScriptRoot "ArchiveScoutCLI"
 $Destination = Join-Path $env:LOCALAPPDATA "Programs\ArchiveScout"
 if (-not (Test-Path $Source)) { throw "ArchiveScout application folder was not found." }
+if (-not (Test-Path $CLISource)) { throw "ArchiveScoutCLI application folder was not found." }
 if (Test-Path $Destination) { Remove-Item $Destination -Recurse -Force }
 New-Item -ItemType Directory -Path $Destination -Force | Out-Null
 Copy-Item "$Source\*" $Destination -Recurse -Force
+$CLIDestination = Join-Path $Destination "ArchiveScoutCLI"
+Copy-Item $CLISource $CLIDestination -Recurse -Force
+$CLIWrapper = Join-Path $Destination "archive-scout.cmd"
+$CLIWrapperText = "@echo off`r`n`"%~dp0ArchiveScoutCLI\ArchiveScoutCLI.exe`" %*`r`n"
+$CLIWrapperText | Set-Content $CLIWrapper -Encoding ascii
 $Shell = New-Object -ComObject WScript.Shell
 $DesktopShortcut = $Shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath("Desktop")) "Archive Scout.lnk"))
 $DesktopShortcut.TargetPath = Join-Path $Destination "ArchiveScout.exe"
