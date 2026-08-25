@@ -4,6 +4,12 @@ Archive Scout is a cross-platform desktop research workspace for indexing, downl
 
 Archive Scout 1.0.2 keeps the established project-based workflow while adding Research Intelligence, much faster broad CDX pagination, an automation-grade CLI, provider-neutral OpenAI/OpenRouter support, and the reliability/media improvements from 1.0.1 and 1.0.0.
 
+## Downloads
+
+- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.2/ArchiveScout-Windows-x64.zip)
+- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.2/ArchiveScout-Linux-x64.zip)
+- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.2/ArchiveScout-macOS-Universal.zip)
+
 ## Core workflow
 
 A typical research project follows this sequence:
