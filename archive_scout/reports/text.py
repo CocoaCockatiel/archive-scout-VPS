@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 from collections import Counter
@@ -53,7 +54,11 @@ def safe_run_name(value: str) -> str:
 
 def _copy_latest(run_path: Path, latest_path: Path) -> None:
     latest_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(run_path, latest_path)
+    try:
+        latest_path.unlink(missing_ok=True)
+        os.link(run_path, latest_path)
+    except OSError:
+        shutil.copyfile(run_path, latest_path)
 
 
 def generate_reports(

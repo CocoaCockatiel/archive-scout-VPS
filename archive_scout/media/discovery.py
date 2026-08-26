@@ -5,11 +5,11 @@ import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, unquote_plus, urlsplit
 
 from ..config import MediaConfig
 from ..content import decode_bytes, normalize_link, safe_urlsplit
-from ..parsing.embeds import extract_embed_candidates
+from ..parsing.embeds import EMBED_URL_PATTERN, FLASHVARS_URL_PATTERN, SCRIPT_MEDIA_PATTERN
 from .extensions import allowed_media_url, extension_from_url, media_kind
 
 CSS_URL_PATTERN = re.compile(r"(?is)url\(\s*(['\"]?)(.*?)\1\s*\)")
@@ -114,6 +114,14 @@ class _MediaParser(HTMLParser):
         elif tag in {"embed", "object"}:
             raw = mapped.get("src") or mapped.get("data") or mapped.get("data-src") or ""
             self._add(raw, "video")
+        elif tag == "param":
+            name = mapped.get("name", "").casefold()
+            value = mapped.get("value", "")
+            if name == "flashvars":
+                for match in FLASHVARS_URL_PATTERN.finditer(value):
+                    self._add(unquote_plus(match.group(1)), "video")
+            elif name in {"movie", "file", "filename", "url", "src", "media", "clip"}:
+                self._add(value, "video")
         elif tag in {"iframe", "frame"}:
             # Frame URLs themselves are not assumed to be media. Legacy player
             # extraction handles direct media configuration embedded in frames.
@@ -148,7 +156,11 @@ class _MediaParser(HTMLParser):
             self._add(match.group(2), "image")
 
 
-def _allowed(candidate: DiscoveredMedia, media: MediaConfig) -> DiscoveredMedia | None:
+def _allowed(
+    candidate: DiscoveredMedia,
+    media: MediaConfig,
+    excluded_extensions: frozenset[str],
+) -> DiscoveredMedia | None:
     allowed, kind, _ = allowed_media_url(candidate.url, media)
     if allowed and kind:
         return DiscoveredMedia(candidate.url, kind)
@@ -158,7 +170,7 @@ def _allowed(candidate: DiscoveredMedia, media: MediaConfig) -> DiscoveredMedia 
         if candidate.kind_hint == "video" and not media.include_videos:
             return None
         extension = extension_from_url(candidate.url)
-        if extension and extension in set(media.normalized().exclude_extensions):
+        if extension and extension in excluded_extensions:
             return None
         # Extensionless/tag-identified media is retained so CDX MIME metadata can
         # make the final decision during lookup.
@@ -183,17 +195,22 @@ def discover_media(raw: str, base_url: str, media: MediaConfig, known_links: lis
     except Exception:
         pass
     candidates.extend(parser.items)
-    for embed in extract_embed_candidates(raw, base_url):
-        hint = "video" if embed.asset_type in {"media", "flash", "playlist"} else ""
-        candidates.append(DiscoveredMedia(unwrap_wayback_url(embed.url), hint))
+    # Legacy player/config URLs are recovered with regex passes over the same raw
+    # text instead of feeding the whole document through a second HTMLParser.
+    for pattern in (EMBED_URL_PATTERN, SCRIPT_MEDIA_PATTERN):
+        for match in pattern.finditer(raw):
+            value = _normalize(match.group(1), base_url)
+            if value:
+                candidates.append(DiscoveredMedia(value, "video"))
     for match in CSS_URL_PATTERN.finditer(raw):
         value = _normalize(match.group(2), base_url)
         if value:
             candidates.append(DiscoveredMedia(value, "image"))
 
     unique: dict[str, DiscoveredMedia] = {}
+    excluded_extensions = frozenset(media.exclude_extensions)
     for candidate in candidates:
-        accepted = _allowed(candidate, media)
+        accepted = _allowed(candidate, media, excluded_extensions)
         if not accepted:
             continue
         current = unique.get(accepted.url)

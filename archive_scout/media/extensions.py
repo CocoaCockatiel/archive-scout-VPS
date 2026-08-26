@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -20,12 +21,16 @@ def extension_from_url(url: str) -> str:
             return suffix
         # Some archived URLs contain tracking data attached with '&' or ';'
         # directly to the path, so pathlib sees '.jpg&ref=...' as the suffix.
-        matches = list(MEDIA_SUFFIX_PATTERN.finditer(path))
-        if matches:
-            return matches[-1].group(1).casefold()
+        last_match = None
+        for match in MEDIA_SUFFIX_PATTERN.finditer(path):
+            last_match = match
+        if last_match is not None:
+            return last_match.group(1).casefold()
         # Media can also be passed as a query value, for example file=clip.wmv.
-        matches = list(MEDIA_SUFFIX_PATTERN.finditer(unquote(parsed.query)))
-        return matches[-1].group(1).casefold() if matches else ""
+        last_match = None
+        for match in MEDIA_SUFFIX_PATTERN.finditer(unquote(parsed.query)):
+            last_match = match
+        return last_match.group(1).casefold() if last_match is not None else ""
     except Exception:
         return ""
 
@@ -45,20 +50,45 @@ def media_kind(extension: str, mimetype: str = "") -> str | None:
     return None
 
 
-def selected_extensions(config: MediaConfig) -> list[str]:
-    media = config.normalized()
-    excluded = set(media.exclude_extensions)
+@lru_cache(maxsize=128)
+def _media_policy(
+    include_images: bool,
+    include_videos: bool,
+    include_extensions: tuple[str, ...],
+    exclude_extensions: tuple[str, ...],
+) -> tuple[tuple[str, ...], frozenset[str]]:
+    """Compile the media allow-list once per settings combination.
+
+    Media discovery can evaluate tens of thousands of URLs. Older code rebuilt
+    normalized configuration objects and extension sets for every candidate.
+    """
+    excluded = frozenset(normalize_extension(value) for value in exclude_extensions if normalize_extension(value))
     selected: list[str] = []
-    for extension in media.include_extensions:
+    for raw in include_extensions:
+        extension = normalize_extension(raw)
         kind = media_kind(extension)
-        if extension in excluded or kind is None:
+        if not extension or extension in excluded or kind is None:
             continue
-        if kind == "image" and not media.include_images:
+        if kind == "image" and not include_images:
             continue
-        if kind == "video" and not media.include_videos:
+        if kind == "video" and not include_videos:
             continue
         selected.append(extension)
-    return list(dict.fromkeys(selected))
+    return tuple(dict.fromkeys(selected)), excluded
+
+
+def _policy_for(config: MediaConfig) -> tuple[tuple[str, ...], frozenset[str]]:
+    return _media_policy(
+        bool(config.include_images),
+        bool(config.include_videos),
+        tuple(str(value) for value in config.include_extensions),
+        tuple(str(value) for value in config.exclude_extensions),
+    )
+
+
+def selected_extensions(config: MediaConfig) -> list[str]:
+    selected, _excluded = _policy_for(config)
+    return list(selected)
 
 
 def allowed_media_url(url: str, config: MediaConfig, mimetype: str = "") -> tuple[bool, str | None, str]:
@@ -66,10 +96,10 @@ def allowed_media_url(url: str, config: MediaConfig, mimetype: str = "") -> tupl
     kind = media_kind(extension, mimetype)
     if not kind:
         return False, None, extension
-    selected = set(selected_extensions(config))
+    selected, excluded = _policy_for(config)
     if extension and extension not in selected:
         return False, kind, extension
-    if extension in set(config.normalized().exclude_extensions):
+    if extension in excluded:
         return False, kind, extension
     if kind == "image" and not config.include_images:
         return False, kind, extension

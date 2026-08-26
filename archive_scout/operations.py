@@ -128,16 +128,23 @@ def run_project(
     original_callback = callback
     owner_thread_id = threading.get_ident()
     last_progress_write = 0.0
+    last_progress_stage = ""
 
     def operation_callback(event: ProgressEvent) -> None:
-        nonlocal last_progress_write
+        nonlocal last_progress_write, last_progress_stage
         if threading.get_ident() == owner_thread_id:
             now = time.monotonic()
-            should_write = (
+            completed_boundary = (
                 event.current is not None
-                or event.total is not None
-                or now - last_progress_write >= 0.5
+                and event.total is not None
+                and event.total >= 0
+                and event.current >= event.total
             )
+            stage_changed = bool(event.stage) and event.stage != last_progress_stage
+            # UI/bot callbacks still receive every event immediately. Persisted
+            # operation progress is rate-limited so a fast download/scan no longer
+            # forces a full SQLite commit for every single completed item.
+            should_write = stage_changed or completed_boundary or now - last_progress_write >= 0.75
             if should_write:
                 update_operation_run(
                     database,
@@ -149,6 +156,7 @@ def run_project(
                 )
                 database.commit()
                 last_progress_write = now
+                last_progress_stage = event.stage
         if original_callback:
             original_callback(event)
 

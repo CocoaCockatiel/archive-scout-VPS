@@ -25,11 +25,11 @@ class PageFetchResult:
 def effective_page_workers(requested_workers: int, page_blocks: int) -> int:
     """Bound concurrent page bodies while favoring fewer, server-sized pages.
 
-    ``page_blocks == 0`` is Archive Scout 1.0.2's fast default: pageSize is
-    omitted and Internet Archive chooses its normal large page grouping. Those
-    bodies are much larger than the old nine-block pages, so three concurrent
-    requests are enough to hide latency without multiplying memory use. Explicit
-    smaller page sizes may still use more workers.
+    ``page_blocks == 0`` in the explicit paged compatibility strategy means
+    pageSize is omitted and Internet Archive chooses its normal page grouping.
+    Those bodies can be much larger than old fixed-block pages, so three
+    concurrent requests are enough to hide latency without multiplying memory
+    use. Explicit smaller page sizes may still use more workers.
     """
     requested = max(1, int(requested_workers))
     blocks = int(page_blocks)

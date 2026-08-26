@@ -1,42 +1,47 @@
-# Archive Scout 1.0.2
+# Archive Scout 1.0.3
 
-Archive Scout 1.0.2 is the Research Intelligence, fast-indexing, and automation release. It preserves the 1.0 desktop workflow while removing the broad-CDX page-count bottleneck and adding a bot-safe command-line contract.
+Archive Scout 1.0.3 is the final performance-focused release. It keeps the 1.0.2 interface and feature set, but replaces the slowest acquisition architecture and applies a full hot-path optimization pass across indexing, media, scanning, analysis, reports, SQLite, and Research Intelligence.
 
-## Research Intelligence
+## Indexing
 
-- Added a persistent project-wide research index over downloaded documents.
-- Added hybrid local retrieval using full-text evidence, compact vectors, extracted entities, deterministic Archive Scout scores, duplicate clusters, and relationship edges.
-- Added evidence graph/timeline relationships from hyperlinks, duplicate groups, provenance analysis, and reconstructed forum threads.
-- Added optional citation-grounded deep AI review. Archived source text is treated as hostile data, and unsupported document-ID citations are discarded.
-- Added incremental indexing: unchanged document hashes are not re-embedded/re-extracted.
-- Added dependency-free `local-hash` retrieval and an optional FastEmbed backend for source installations.
+- Automatic broad indexing is now resume-key-first instead of numbered-page-first.
+- Default resume batches increase from 50,000 to 100,000 CDX rows.
+- Existing unfinished 1.0.2 numbered queues are converted safely on resume; already indexed captures remain in SQLite.
+- `urlkey` is retained in CDX fields so continuation ordering is explicit and reliable while compact stored row shape remains unchanged.
+- Healthy target-years begin as one large resumable window and subdivide only when Wayback actually times out or rejects the request.
+- Explicit paged indexing remains available for compatibility and troubleshooting.
+- Shared process-wide request pacing, host gating, finite 429/503 pause budgets, transport fallback, and exact saved recovery state remain intact.
 
-## Faster broad indexing
+## Media
 
-- Removed the old forced nine-ZipNum-block CDX page size for broad paginated queries.
-- Broad paging now uses the CDX server's configured large page grouping by default, drastically reducing HTTP page count for very large sites.
-- Large server-sized page bodies use a bounded three-request concurrency cap; explicit smaller page sizes can use more overlap.
-- Existing resume-key recovery, year windows, persistence, site-issue reporting, and shared Wayback rate coordination are preserved.
-- Untouched 1.0.1 `page_blocks=9` projects automatically adopt the new default; deliberately customized page sizes remain unchanged.
+- Direct media indexing uses the same resume-key-first traversal.
+- Automatic `page_blocks=0` is no longer capable of degrading into `pageSize=1`.
+- Earliest/latest exact embedded-media lookups request only the capture needed instead of traversing a large result set.
+- Embedded discovery avoids a second full HTML parser pass and batches local discovery writes.
+- External asset/media lookups use bounded concurrency under the same shared Wayback limiter.
+- Media extension and allow/exclude policies are compiled and reused instead of rebuilt for every candidate URL.
 
-## Automation and bots
+## Local scanning and analysis
 
-- Added `run`, `init`, `status`, `search`, `results`, `errors`, `research-index`, `research`, and `ai-review` CLI commands.
-- Added `text`, `json`, and streaming `jsonl` output and serialized ProgressEvent records.
-- Added stable exit codes: 0 success, 1 unexpected failure, 2 arguments/configuration, 3 safely deferred network/rate condition, and 130 interruption.
-- Ctrl+C uses the same stop event as the GUI so resumable work is preserved.
-- Read-only commands use SQLite query-only mode.
-- Release packages now contain a separate `ArchiveScoutCLI` executable alongside the GUI.
-- Added `AGENTS.md`, `CLAUDE.md`, `docs/AUTOMATION.md`, and a noninteractive example project.
+- Literal candidate collection reuses output sets instead of allocating one per field.
+- Regex matches are streamed instead of materialized into temporary lists.
+- Proximity scoring uses ordered two-pointer distance calculation instead of Cartesian keyword-position comparisons.
+- Single-keyword matches skip sentence/paragraph/proximity passes that cannot change their score.
+- HTML title extraction is folded into the existing parser pass; URL extraction and extension checks avoid unnecessary temporary objects.
+- Duplicate SimHash generation, snapshot comparison, first-appearance searching, extraction work, and analysis writes were tightened for large projects.
 
-## AI providers and secrets
+## Database, reports, and Research Intelligence
 
-- Added provider-neutral AI request/service interfaces with dedicated OpenAI Responses and OpenRouter chat-completions adapters.
-- Added ignored `.env` developer support through `python-dotenv`; real environment variables retain precedence.
-- Added `.env.example`. API keys are never persisted in project/database/report state and are never printed.
+- Compact CDX rows are unpacked once per insert instead of repeating mapping/position work for every field.
+- Error identity lookups are sargable and backed by targeted indexes.
+- Additional indexes accelerate document-match, duplicate, forum, and legacy-asset relationship queries.
+- Research Intelligence bulk-fetches candidate entities/relationships and avoids project-sized Python sets during stale-vector cleanup.
+- Evidence graph rebuilding is skipped when its dependencies are unchanged.
+- Report replacement and several analysis stages avoid unnecessary filesystem/database work.
 
 ## Compatibility
 
-- Database schema is version 7 with automatic safety-backed migration from schema 6.
-- Archive Scout 1.0.0/1.0.1 project databases remain supported.
-- Existing AI relevance, external embedded media, scanning, review, reports, recovery, analysis, diagnostics, and merge features remain available.
+- Public version: 1.0.3.
+- Database schema remains version 7.
+- Existing 1.0.0–1.0.2 projects remain supported.
+- GUI, CLI/bot automation, AI providers, external embedded media, review/report workflows, project recovery, diagnostics, and Research Intelligence remain available.

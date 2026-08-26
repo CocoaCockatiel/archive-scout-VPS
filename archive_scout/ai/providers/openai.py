@@ -4,6 +4,7 @@ import json
 
 import httpx
 
+from ...constants import VERSION
 from ..models import AIRequest, AIResponse
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
@@ -19,7 +20,7 @@ class OpenAIProvider:
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
-                "User-Agent": "ArchiveScout/1.0.2",
+                "User-Agent": f"ArchiveScout/{VERSION}",
             },
         )
 

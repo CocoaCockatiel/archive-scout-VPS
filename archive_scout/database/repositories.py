@@ -25,31 +25,35 @@ def get_or_create_target(database: sqlite3.Connection, pattern: str, settings: d
     return int(cursor.lastrowid)
 
 
-def _cdx_value(row: Mapping[str, object] | Sequence[object], name: str) -> str:
-    if isinstance(row, Mapping):
-        value = row.get(name, "")
-    else:
-        positions = {
-            "timestamp": 0,
-            "original": 1,
-            "mimetype": 2,
-            "statuscode": 3,
-            "digest": 4,
-            "length": 5,
-        }
-        index = positions[name]
-        value = row[index] if index < len(row) else ""
+_CDX_FIELD_NAMES = ("timestamp", "original", "mimetype", "statuscode", "digest", "length")
+_CDX_FIELD_POSITIONS = {name: index for index, name in enumerate(_CDX_FIELD_NAMES)}
+
+
+def _string_value(value: object) -> str:
     return str(value if value is not None else "")
 
 
+def _cdx_fields(row: Mapping[str, object] | Sequence[object]) -> tuple[str, str, str, str, str, str]:
+    """Extract the compact CDX row once instead of rebuilding lookup state per field."""
+    if isinstance(row, Mapping):
+        return tuple(_string_value(row.get(name, "")) for name in _CDX_FIELD_NAMES)  # type: ignore[return-value]
+    length = len(row)
+    return tuple(_string_value(row[index]) if index < length else "" for index in range(6))  # type: ignore[return-value]
+
+
+def _cdx_value(row: Mapping[str, object] | Sequence[object], name: str) -> str:
+    return _cdx_fields(row)[_CDX_FIELD_POSITIONS[name]]
+
+
 def cdx_row_to_dict(row: Mapping[str, object] | Sequence[object]) -> dict[str, str]:
+    timestamp, original, mimetype, statuscode, digest, length = _cdx_fields(row)
     return {
-        "timestamp": _cdx_value(row, "timestamp"),
-        "original": _cdx_value(row, "original"),
-        "mimetype": _cdx_value(row, "mimetype"),
-        "statuscode": _cdx_value(row, "statuscode"),
-        "digest": _cdx_value(row, "digest"),
-        "length": _cdx_value(row, "length"),
+        "timestamp": timestamp,
+        "original": original,
+        "mimetype": mimetype,
+        "statuscode": statuscode,
+        "digest": digest,
+        "length": length,
     }
 
 
@@ -66,15 +70,16 @@ def _capture_values(
     query_signature: str,
     now: str,
 ) -> tuple:
+    timestamp, original, mimetype, statuscode, digest, length = _cdx_fields(row)
     return (
-        _cdx_value(row, "original"),
-        _cdx_value(row, "timestamp"),
+        original,
+        timestamp,
         target_id,
         query_signature,
-        _cdx_value(row, "mimetype"),
-        _cdx_value(row, "statuscode"),
-        _cdx_value(row, "digest"),
-        _safe_length(_cdx_value(row, "length")),
+        mimetype,
+        statuscode,
+        digest,
+        _safe_length(length),
         "pending",
         now,
         now,
@@ -371,16 +376,26 @@ def record_error(
     retryable: bool = True,
 ) -> int:
     now = utc_now()
+    # Keep nullable identity columns sargable. Older code wrapped every identity
+    # in COALESCE(), which prevented SQLite from using the capture/media error
+    # lookup indexes precisely when a failing large project needed them most.
+    clauses = ["resolved=0", "ignored=0", "operation=?", "category=?"]
+    params: list[object] = [operation, category]
+    for column, value in (
+        ("capture_id", capture_id),
+        ("document_id", document_id),
+        ("media_capture_id", media_capture_id),
+    ):
+        if value is None:
+            clauses.append(f"{column} IS NULL")
+        else:
+            clauses.append(f"{column}=?")
+            params.append(int(value))
     row = database.execute(
-        """
-        SELECT id,attempt_count FROM errors
-        WHERE resolved=0 AND ignored=0 AND operation=? AND category=?
-          AND COALESCE(capture_id,0)=COALESCE(?,0)
-          AND COALESCE(document_id,0)=COALESCE(?,0)
-          AND COALESCE(media_capture_id,0)=COALESCE(?,0)
-        ORDER BY id DESC LIMIT 1
-        """,
-        (operation, category, capture_id, document_id, media_capture_id),
+        "SELECT id,attempt_count FROM errors WHERE "
+        + " AND ".join(clauses)
+        + " ORDER BY id DESC LIMIT 1",
+        params,
     ).fetchone()
     if row:
         database.execute(
@@ -666,20 +681,21 @@ def upsert_media_captures(
         """
     batch: list[tuple] = []
     for row, media_kind, extension in items:
+        timestamp, original, mimetype, statuscode, digest, length = _cdx_fields(row)
         batch.append(
             (
-                _cdx_value(row, "original"),
-                _cdx_value(row, "timestamp"),
+                original,
+                timestamp,
                 target_id,
                 source_document_id,
                 source_type,
                 query_signature,
                 media_kind,
                 extension,
-                _cdx_value(row, "mimetype"),
-                _cdx_value(row, "statuscode"),
-                _cdx_value(row, "digest"),
-                _safe_length(_cdx_value(row, "length")),
+                mimetype,
+                statuscode,
+                digest,
+                _safe_length(length),
                 "pending",
                 now,
                 now,

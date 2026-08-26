@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.3
+
+- Replaced automatic numbered CDX paging with resume-key-first traversal for broad indexes, eliminating the thousands-of-pages failure mode on very large sites.
+- Automatically converts unfinished v1.0.2 numbered-page queues to resumable row batches without deleting captures already stored in SQLite.
+- Increased the default resumable CDX batch to 100,000 rows while preserving adaptive date-window subdivision, shared request pacing, finite pause budgets, and explicit paged mode for diagnostics.
+- Applied the same resume-key-first strategy to direct-media indexing and fixed automatic media paging so `page_blocks=0` can never become `pageSize=1`.
+- Reduced embedded-media exact lookups to the minimum CDX data required for earliest/latest policies and parallelized bounded external-asset/media discovery.
+- Optimized CDX parsing/ingestion, error lookups, HTML parsing, media URL policy checks, keyword/proximity scoring, duplicate analysis, snapshot analysis, report replacement, and analysis batching.
+- Reworked Research Intelligence indexing/search hot paths to reduce N+1 queries, project-sized temporary state, redundant graph rebuilds, and unnecessary entity/vector work.
+- Added database indexes for hot review/error/analysis relationships without changing schema version 7.
+- Added regression coverage for automatic resume traversal, v1.0.2 queue conversion, 100,000-row continuation, media indexing, URL-key continuation, and compact CDX row semantics.
+- Centralized product version reporting in the CLI and AI provider user agents to prevent release metadata drift.
+
 ## 1.0.2
 
 - Added project-wide Research Intelligence with local hybrid vector/full-text/entity retrieval, duplicate clustering, evidence relationships, and chronological connection context.

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import bisect
 import re
 from collections import Counter
 from itertools import combinations
-from pathlib import Path
 
 from ..constants import ARCHIVE_EXTENSIONS, MEDIA_EXTENSIONS
 from ..content import safe_urlsplit
@@ -22,7 +22,12 @@ def link_is_interesting(
     prefilter: KeywordPrefilter | None = None,
 ) -> bool:
     parsed = safe_urlsplit(link)
-    extension = Path(parsed.path).suffix.lower() if parsed else ""
+    if parsed:
+        filename = parsed.path.rsplit("/", 1)[-1]
+        dot = filename.rfind(".")
+        extension = filename[dot:].lower() if dot > 0 else ""
+    else:
+        extension = ""
     if extension in MEDIA_EXTENSIONS or extension in ARCHIVE_EXTENSIONS:
         return True
     if prefilter is not None:
@@ -33,9 +38,14 @@ def link_is_interesting(
     return keyword_url_match(link, patterns)
 
 
-def _matches(item: CompiledRule, value: str, normalized_value: str) -> list[re.Match[str]]:
+def _matches(item: CompiledRule, value: str, normalized_value: str):
+    """Yield regex matches without materializing a per-rule list."""
     haystack = value if item.rule.case_sensitive else normalized_value
-    return list(item.pattern.finditer(haystack))
+    return item.pattern.finditer(haystack)
+
+
+def _match_count(item: CompiledRule, value: str, normalized_value: str) -> int:
+    return sum(1 for _ in _matches(item, value, normalized_value))
 
 
 def _matched_labels_in_segments(text: str, patterns: list[CompiledRule], splitter: re.Pattern[str]) -> int:
@@ -60,24 +70,31 @@ def _proximity_bonus(text: str, patterns: list[CompiledRule], window_words: int 
     if not word_spans:
         return 0, {"window_words": window_words, "pairs": 0}
     positions: dict[str, list[int]] = {}
+    starts = [span.start() for span in word_spans]
     for item in patterns:
         if item.rule.kind == "excluded":
             continue
+        bucket = positions.setdefault(item.rule.label, [])
         for match in item.pattern.finditer(normalized):
-            word_index = 0
-            lo, hi = 0, len(word_spans)
-            while lo < hi:
-                mid = (lo + hi) // 2
-                if word_spans[mid].start() < match.start():
-                    lo = mid + 1
-                else:
-                    hi = mid
-            word_index = max(0, lo - 1)
-            positions.setdefault(item.rule.label, []).append(word_index)
+            bucket.append(max(0, bisect.bisect_right(starts, match.start()) - 1))
     close_pairs = 0
     minimum_distance: int | None = None
     for left, right in combinations(positions, 2):
-        distance = min(abs(a - b) for a in positions[left] for b in positions[right])
+        left_positions = positions[left]
+        right_positions = positions[right]
+        i = j = 0
+        distance = len(word_spans)
+        # Both lists are generated in document order. A two-pointer minimum is
+        # linear instead of the old Cartesian product for frequent keywords.
+        while i < len(left_positions) and j < len(right_positions):
+            a, b = left_positions[i], right_positions[j]
+            distance = min(distance, abs(a - b))
+            if a < b:
+                i += 1
+            else:
+                j += 1
+            if distance == 0:
+                break
         minimum_distance = distance if minimum_distance is None else min(minimum_distance, distance)
         if distance <= window_words:
             close_pairs += 1
@@ -157,8 +174,7 @@ def analyze_content(
     for field_name, value in fields.items():
         normalized_value = normalized_fields[field_name]
         for item in evaluation_patterns:
-            matches = _matches(item, value, normalized_value)
-            count = len(matches)
+            count = _match_count(item, value, normalized_value)
             if not count:
                 continue
             label = item.rule.label
@@ -178,17 +194,25 @@ def analyze_content(
     if distinct >= 2:
         score += distinct * 3
 
-    sentence_bonus = _matched_labels_in_segments(visible, list(matched_rules.values()), SENTENCE_SPLIT) * 4
-    paragraph_bonus = _matched_labels_in_segments(raw, list(matched_rules.values()), PARAGRAPH_SPLIT) * 2
-    proximity_bonus, proximity = _proximity_bonus(visible, list(matched_rules.values()))
+    positive_matched_rules = [item for item in matched_rules.values() if item.rule.kind != "excluded"]
+    # Sentence, paragraph, and word-distance bonuses require at least two
+    # positive labels by definition. Most archive hits contain only one keyword;
+    # skipping three whole-document passes in that common case is a substantial
+    # scan-speed win with identical scores.
+    if len(positive_matched_rules) >= 2:
+        sentence_bonus = _matched_labels_in_segments(visible, positive_matched_rules, SENTENCE_SPLIT) * 4
+        paragraph_bonus = _matched_labels_in_segments(raw, positive_matched_rules, PARAGRAPH_SPLIT) * 2
+        proximity_bonus, proximity = _proximity_bonus(visible, positive_matched_rules)
+    else:
+        sentence_bonus = paragraph_bonus = proximity_bonus = 0
+        proximity = {"window_words": 25, "pairs": 0, "minimum_distance": None}
     score += sentence_bonus + paragraph_bonus + proximity_bonus
     proximity.update({"sentence_bonus": sentence_bonus, "paragraph_bonus": paragraph_bonus, "score_bonus": proximity_bonus})
 
     if excluded or missing_required:
         score = 0
     interesting_links = sorted({link for link in links if link_is_interesting(link, patterns, prefilter)})
-    positive_patterns = [item for item in matched_rules.values() if item.rule.kind != "excluded"]
-    snippets = make_snippets(visible or raw, positive_patterns) if positive_patterns else []
+    snippets = make_snippets(visible or raw, positive_matched_rules) if positive_matched_rules else []
     return {
         "score": int(round(score)),
         "hits": dict(sorted(hits.items())),

@@ -184,7 +184,7 @@ class ArchiveScoutApp(tk.Tk):
         self.cdx_match_type_var = tk.StringVar(value="Automatic")
         self.collapse_urlkey_var = tk.BooleanVar(value=True)
         self.collapse_digest_var = tk.BooleanVar(value=False)
-        self.page_size_var = tk.StringVar(value="50000")
+        self.page_size_var = tk.StringVar(value="100000")
         self.workers_var = tk.StringVar(value=str(min(4, max(2, cpu_count))))
         self.max_file_var = tk.StringVar(value="25")
         self.minimum_score_var = tk.StringVar(value="1")
@@ -610,7 +610,7 @@ class ArchiveScoutApp(tk.Tk):
         collapse.grid(row=4, column=1, sticky="w", padx=(10, 0), pady=4)
         ttk.Checkbutton(collapse, text="collapse=urlkey", variable=self.collapse_urlkey_var).grid(row=0, column=0)
         ttk.Checkbutton(collapse, text="collapse=digest", variable=self.collapse_digest_var).grid(row=0, column=1, padx=(18, 0))
-        ttk.Label(tab, text="Results per CDX page:").grid(row=5, column=0, sticky="w", pady=4)
+        ttk.Label(tab, text="Resume batch size (CDX rows):").grid(row=5, column=0, sticky="w", pady=4)
         ttk.Entry(tab, textvariable=self.page_size_var, width=22).grid(row=5, column=1, sticky="w", padx=(10, 0), pady=4)
         options = ttk.Frame(tab)
         options.grid(row=6, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
@@ -769,14 +769,14 @@ class ArchiveScoutApp(tk.Tk):
         network_rows = [
             ("Connection backend", self.network_backend_var, ("auto", "httpx", "urllib3", "curl")),
             ("CDX endpoint", self.network_endpoint_var, ("auto", "cdx", "timemap")),
-            ("Index strategy", self.network_strategy_var, ("auto", "paged", "resume")),
+            ("Index strategy (auto = fast resume)", self.network_strategy_var, ("auto", "resume", "paged")),
         ]
         for row, (label, variable, values) in enumerate(network_rows, start=1):
             ttk.Label(tab, text=label + ":").grid(row=row, column=2, sticky="w", pady=4)
             ttk.Combobox(tab, textvariable=variable, values=values, state="readonly", width=18).grid(row=row, column=3, sticky="w", padx=(10, 0), pady=4)
         numeric = [
-            ("Parallel CDX page requests", self.network_cdx_workers_var),
-            ("CDX page blocks", self.network_page_blocks_var),
+            ("Parallel CDX requests", self.network_cdx_workers_var),
+            ("Numbered-paging blocks (paged only)", self.network_page_blocks_var),
             ("Retry base (seconds)", self.network_retry_base_var),
             ("Retry ceiling (seconds)", self.network_retry_max_var),
             ("Failures before graceful pause", self.network_failure_limit_var),

@@ -2,13 +2,7 @@
 
 Archive Scout is a cross-platform desktop research workspace for indexing, downloading, searching, reviewing, reconstructing, and analyzing public captures from the Internet Archive's Wayback Machine.
 
-Archive Scout 1.0.2 keeps the established project-based workflow while adding Research Intelligence, much faster broad CDX pagination, an automation-grade CLI, provider-neutral OpenAI/OpenRouter support, and the reliability/media improvements from 1.0.1 and 1.0.0.
-
-## Downloads
-
-- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.2/ArchiveScout-Windows-x64.zip)
-- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.2/ArchiveScout-Linux-x64.zip)
-- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.2/ArchiveScout-macOS-Universal.zip)
+Archive Scout 1.0.3 is the final performance-focused release. It preserves the established project workflow and Research Intelligence/automation features while replacing the large-site CDX bottleneck with resume-key-first indexing and optimizing the major local, database, media, analysis, and research hot paths.
 
 ## Core workflow
 
@@ -30,7 +24,7 @@ Archive Scout stores project state in SQLite so long jobs can be stopped and res
 
 ## Research Intelligence
 
-Archive Scout 1.0.2 treats a completed project as one evidence corpus. The local research index combines full-text evidence, compact vectors, extracted entities/identifiers, duplicate clusters, deterministic Archive Scout scores, hyperlinks, provenance relationships, reconstructed forum relationships, and capture timestamps.
+Archive Scout 1.0.3 treats a completed project as one evidence corpus. The local research index combines full-text evidence, compact vectors, extracted entities/identifiers, duplicate clusters, deterministic Archive Scout scores, hyperlinks, provenance relationships, reconstructed forum relationships, and capture timestamps.
 
 The **Research intelligence** tab can:
 
@@ -149,9 +143,11 @@ The execution engine is designed around bounded work rather than project-sized i
 
 The offline benchmark runner can exercise large CDX parsing, database insertion, result pagination, keyword matching, and no-op repeated indexing without contacting the Internet Archive.
 
-### Faster broad CDX indexing in 1.0.2
+### Resume-key-first indexing in 1.0.3
 
-Older Archive Scout defaults forced broad paginated CDX queries to `pageSize=9`, which could turn very large sites into thousands of page requests. 1.0.2 omits that artificial small page size by default and uses the CDX server's configured large page grouping, while limiting the number of large page bodies held concurrently. Explicit smaller `pageSize` values remain available for troubleshooting constrained systems. Resume-key indexing is unchanged for queries where it is the safer strategy.
+Automatic indexing no longer asks Wayback for a numbered page count. Large targets are traversed in resumable 100,000-row CDX batches using `showResumeKey=true`, so performance scales with returned rows instead of Wayback's internal ZipNum page topology. This removes the pathological `page 1 / thousands` workflow that could take days or weeks on very large sites.
+
+Unfinished numbered queues created by 1.0.2 are converted automatically when resumed. Captures already committed to SQLite are kept; replayed rows are handled by no-op upserts. If a large resume batch is too expensive for Wayback, Archive Scout subdivides the affected date window and keeps the rest of the saved queue intact. Explicit `paged` mode remains available only as a compatibility/diagnostic choice. Direct-media indexing follows the same strategy.
 
 ## Automation and bot compatibility
 

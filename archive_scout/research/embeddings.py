@@ -21,26 +21,25 @@ class EncodedVector:
     token_count: int
 
 
-def _feature_stream(text: str) -> tuple[list[str], int]:
-    tokens = TOKEN_RE.findall(normalize_search(text))
-    features: list[str] = []
+def _feature_stream(tokens: list[str]):
+    # Yield features instead of materializing a second potentially huge list.
     for token in tokens:
         if len(token) > 1:
-            features.append("w:" + token)
-            # Character trigrams improve robustness to spelling/URL variants and
-            # provide useful approximate retrieval even without a neural model.
+            yield "w:" + token
             padded = f"^{token}$"
-            features.extend("c:" + padded[i:i + 3] for i in range(max(0, len(padded) - 2)))
-    features.extend("b:" + tokens[i] + " " + tokens[i + 1] for i in range(max(0, len(tokens) - 1)))
-    return features, len(tokens)
+            for index in range(max(0, len(padded) - 2)):
+                yield "c:" + padded[index:index + 3]
+    for index in range(max(0, len(tokens) - 1)):
+        yield "b:" + tokens[index] + " " + tokens[index + 1]
 
 
 def local_hash_vector(text: str, dimensions: int = 256) -> EncodedVector:
     dimensions = max(64, min(1024, int(dimensions)))
     values = [0.0] * dimensions
-    features, token_count = _feature_stream(text)
+    tokens = TOKEN_RE.findall(normalize_search(text))
+    token_count = len(tokens)
     counts: dict[str, int] = {}
-    for feature in features:
+    for feature in _feature_stream(tokens):
         counts[feature] = counts.get(feature, 0) + 1
     for feature, count in counts.items():
         digest = hashlib.blake2b(feature.encode("utf-8", "replace"), digest_size=16).digest()
@@ -51,7 +50,7 @@ def local_hash_vector(text: str, dimensions: int = 256) -> EncodedVector:
     norm = math.sqrt(sum(value * value for value in values)) or 1.0
     unit = tuple(value / norm for value in values)
     blob = bytes(struct.pack(f"<{dimensions}b", *(max(-127, min(127, int(round(v * 127)))) for v in unit)))
-    return EncodedVector(unit, blob, 1.0 if features else 0.0, token_count)
+    return EncodedVector(unit, blob, 1.0 if counts else 0.0, token_count)
 
 
 def decode_int8_vector(blob: bytes, dimensions: int) -> tuple[float, ...]:
@@ -66,6 +65,23 @@ def decode_int8_vector(blob: bytes, dimensions: int) -> tuple[float, ...]:
 
 def cosine(left: Iterable[float], right: Iterable[float]) -> float:
     return sum(a * b for a, b in zip(left, right))
+
+
+def cosine_int8(left: Iterable[float], blob: bytes, dimensions: int) -> float:
+    """Cosine against a stored normalized int8 vector without tuple decoding."""
+    dimensions = max(1, int(dimensions))
+    if len(blob) != dimensions:
+        return 0.0
+    right = memoryview(blob).cast("b")
+    dot = 0.0
+    norm_sq = 0
+    for a, b in zip(left, right):
+        value = int(b)
+        dot += float(a) * value
+        norm_sq += value * value
+    if not norm_sq:
+        return 0.0
+    return dot / math.sqrt(norm_sq)
 
 
 def vector_bands(values: tuple[float, ...], bands: int = 8) -> list[tuple[int, str]]:

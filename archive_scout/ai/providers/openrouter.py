@@ -6,6 +6,7 @@ import re
 import httpx
 
 from ...environment import environment_value
+from ...constants import VERSION
 from ..models import AIRequest, AIResponse
 
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -28,7 +29,7 @@ class OpenRouterProvider:
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
-            "User-Agent": "ArchiveScout/1.0.2",
+            "User-Agent": f"ArchiveScout/{VERSION}",
         }
         referer = environment_value("OPENROUTER_HTTP_REFERER").strip()
         title = environment_value("OPENROUTER_APP_TITLE", "Archive Scout").strip()

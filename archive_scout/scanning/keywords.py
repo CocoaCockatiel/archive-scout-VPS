@@ -206,7 +206,7 @@ class KeywordPrefilter:
         if self.candidate_automaton is not None:
             expressions: set[str] = set()
             for value in normalized_fields.values():
-                expressions.update(self.candidate_automaton.find(value))
+                self.candidate_automaton.find_into(value, expressions)
             for expression in expressions:
                 for item in self.literal_rules.get(expression, ()):
                     marker = id(item)

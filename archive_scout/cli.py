@@ -13,6 +13,7 @@ from typing import Any, Iterable
 from .ai.relevance import run_ai_review
 from .ai.settings import resolve_provider_settings
 from .config import AIConfig, ProjectConfig, ResearchConfig, load_project_config
+from .constants import VERSION
 from .events import ProgressEvent, Stopped
 from .operations import SUPPORTED_MODES, is_recoverable_pause, run_project
 from .research.ai import run_grounded_answer
@@ -72,7 +73,7 @@ def _count_states(database: sqlite3.Connection, table: str) -> dict[str, int]:
 
 def _status(config: ProjectConfig) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "version": "1.0.2",
+        "version": VERSION,
         "project": str(config.output_dir / "project.json"),
         "output_dir": str(config.output_dir),
         "targets": len(config.targets),

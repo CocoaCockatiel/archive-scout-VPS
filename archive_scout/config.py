@@ -256,7 +256,7 @@ class ProjectConfig:
     download_scope: str = "all_text"
     minimum_score: int = 1
     max_file_mb: float = 25.0
-    page_size: int = 50000
+    page_size: int = 100000
     cdx_delay: float = 0.75
     download_delay: float = 0.5
     retries: int = 4
@@ -364,7 +364,7 @@ class ProjectConfig:
             download_scope=self.download_scope if self.download_scope in {"all_text", "keyword_urls", "index_only"} else "all_text",
             minimum_score=max(1, int(self.minimum_score)),
             max_file_mb=max(0.1, float(self.max_file_mb)),
-            page_size=min(50000, max(100, int(self.page_size))),
+            page_size=min(150000, max(100, int(self.page_size))),
             cdx_delay=max(0.0, float(self.cdx_delay)),
             download_delay=max(0.0, float(self.download_delay)),
             retries=min(12, max(1, int(self.retries))),
@@ -436,7 +436,7 @@ def load_project_config(path: Path) -> ProjectConfig:
     ai_payload = payload.get("ai") or {}
     research_payload = payload.get("research") or {}
     network_payload = payload.get("network") or {}
-    loaded_page_size = int(payload.get("page_size", 50000))
+    loaded_page_size = int(payload.get("page_size", 100000))
     loaded_cdx_delay = float(payload.get("cdx_delay", 0.75))
     loaded_page_blocks = int(network_payload.get("page_blocks", 0))
     loaded_cdx_workers = int(network_payload.get("cdx_workers", 10))
@@ -468,6 +468,18 @@ def load_project_config(path: Path) -> ProjectConfig:
         and "page_blocks" in network_payload
     ):
         loaded_page_blocks = 0
+    # v1.0.2 used 50,000-row resume pages and automatic numbered paging.
+    # When that complete untouched transport profile is encountered, upgrade it
+    # to the final fast defaults. Deliberately customized network profiles keep
+    # their saved values.
+    if (
+        loaded_page_size == 50000
+        and loaded_cdx_delay == 0.75
+        and loaded_page_blocks == 0
+        and loaded_cdx_workers == 10
+        and str(network_payload.get("index_strategy", "auto")).casefold() == "auto"
+    ):
+        loaded_page_size = 100000
     return ProjectConfig(
         output_dir=Path(payload.get("output_dir") or path.parent),
         targets=list(payload.get("targets") or []),

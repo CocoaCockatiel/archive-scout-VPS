@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS document_matches(
     FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS document_matches_score_idx ON document_matches(scan_run_id,score DESC);
+CREATE INDEX IF NOT EXISTS document_matches_document_idx ON document_matches(document_id,excluded,required_missing,score DESC);
 CREATE TABLE IF NOT EXISTS keyword_hits(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     match_id INTEGER NOT NULL,
@@ -129,6 +130,8 @@ CREATE TABLE IF NOT EXISTS errors(
     FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS errors_unresolved_idx ON errors(resolved,ignored,retryable,operation,category);
+CREATE INDEX IF NOT EXISTS errors_capture_lookup_idx ON errors(capture_id,operation,category,resolved,ignored,id DESC);
+CREATE INDEX IF NOT EXISTS errors_media_lookup_idx ON errors(media_capture_id,operation,category,resolved,ignored,id DESC);
 CREATE TABLE IF NOT EXISTS index_state(
     target_id INTEGER NOT NULL,
     year INTEGER NOT NULL,
@@ -186,6 +189,7 @@ CREATE TABLE IF NOT EXISTS duplicate_members(
     FOREIGN KEY(group_id) REFERENCES duplicate_groups(id) ON DELETE CASCADE,
     FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS duplicate_members_document_idx ON duplicate_members(document_id,group_id);
 CREATE TABLE IF NOT EXISTS forum_threads(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     canonical_key TEXT NOT NULL UNIQUE,
@@ -215,6 +219,7 @@ CREATE TABLE IF NOT EXISTS forum_posts(
     FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE,
     FOREIGN KEY(capture_id) REFERENCES captures(id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS forum_posts_document_idx ON forum_posts(document_id,thread_id);
 CREATE TABLE IF NOT EXISTS extractions(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     document_id INTEGER NOT NULL,
@@ -316,6 +321,7 @@ CREATE TABLE IF NOT EXISTS legacy_assets(
     FOREIGN KEY(media_capture_id) REFERENCES media_captures(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS legacy_assets_url_idx ON legacy_assets(original_url,archive_status);
+CREATE INDEX IF NOT EXISTS legacy_assets_lookup_idx ON legacy_assets(external,archive_status,id);
 CREATE TABLE IF NOT EXISTS provenance_edges(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_document_id INTEGER NOT NULL,

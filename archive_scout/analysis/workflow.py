@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import json
 import sqlite3
@@ -67,8 +68,7 @@ def _exact_asset_params(config: ProjectConfig, url: str) -> list[tuple[str, str]
         ("matchType", "exact"),
         ("filter", "statuscode:200"),
         ("collapse", "digest"),
-        ("limit", str(min(config.page_size, 5000))),
-        ("showResumeKey", "true"),
+        ("limit", "1"),
     ]
     return params
 
@@ -85,105 +85,121 @@ def _lookup_external_assets(
     total = min(
         int(analysis.external_asset_limit),
         int(database.execute(
-            """
-            SELECT COUNT(*) FROM legacy_assets
-            WHERE external=1 AND archive_status IN ('discovered','retry')
-            """
+            """SELECT COUNT(*) FROM legacy_assets
+               WHERE external=1 AND archive_status IN ('discovered','retry')"""
         ).fetchone()[0]),
     )
+    if not total:
+        return 0
     rows = database.execute(
-        """
-        SELECT la.id,la.document_id,la.original_url
-        FROM legacy_assets la
-        WHERE la.external=1 AND la.archive_status IN ('discovered','retry')
-        ORDER BY la.id LIMIT ?
-        """,
+        """SELECT la.id,la.document_id,la.original_url
+           FROM legacy_assets la
+           WHERE la.external=1 AND la.archive_status IN ('discovered','retry')
+           ORDER BY la.id LIMIT ?""",
         (total,),
     )
     limiter = SharedFixedRateLimiter(config.cdx_delay)
     host_gate = shared_host_gate(config.rate_limit_base_pause, config.rate_limit_max_pause)
+    workers = min(8, max(1, config.network.normalized().cdx_workers))
 
-    def retry_callback(attempt: int, total: int, reason: str, wait: float) -> None:
-        _emit(callback, "asset_search", f"External asset request delayed ({reason}); retry {attempt}/{total or '∞'} in {wait:.1f}s")
+    def retry_callback(attempt: int, total_attempts: int, reason: str, wait: float) -> None:
+        _emit(callback, "asset_search", f"External asset request delayed ({reason}); retry {attempt}/{total_attempts or '∞'} in {wait:.1f}s")
 
     client = HttpClient(
-        limiter,
-        min(config.retries, 2),
-        min(max(config.read_timeout, 15.0), 60.0),
-        config.user_agent,
-        stop_event,
-        retry_callback=retry_callback,
+        limiter, min(config.retries, 2), min(max(config.read_timeout, 15.0), 60.0),
+        config.user_agent, stop_event, retry_callback=retry_callback,
         connect_timeout=min(max(config.connect_timeout, 5.0), 30.0),
-        read_timeout=min(max(config.read_timeout, 15.0), 60.0),
-        pool_size=1,
-        host_gate=host_gate,
-        rate_limit_attempts=config.rate_limit_attempts,
+        read_timeout=min(max(config.read_timeout, 15.0), 60.0), pool_size=workers,
+        host_gate=host_gate, rate_limit_attempts=config.rate_limit_attempts,
         rate_limit_max_wait=config.rate_limit_max_wait,
         network_backend=config.network.normalized().backend,
         trust_environment=config.network.normalized().trust_environment,
         network_callback=(lambda message: callback(ProgressEvent("network", message)) if callback else None),
     )
-    found = 0
+
+    def lookup(row: sqlite3.Row):
+        try:
+            payload = client.get_json_any(cdx_endpoints(config), _exact_asset_params(config, str(row["original_url"])))
+            captures, _ = parse_cdx(payload)
+            return row, captures, None
+        except BaseException as exc:
+            return row, [], exc
+
+    found = completed = 0
+    batch_size = max(32, workers * 8)
     try:
-        for index, row in enumerate(rows, 1):
-            if stop_event.is_set():
-                raise Stopped
-            url = str(row["original_url"])
-            host = (urllib.parse.urlsplit(url).hostname or "").casefold()
-            if not _external_allowed(host, analysis.external_domains):
-                with database:
-                    database.execute("UPDATE legacy_assets SET archive_status='blocked_domain',updated_at=? WHERE id=?", (utc_now(), row["id"]))
-                continue
-            _emit(callback, "asset_search", f"Searching external asset {index:,}/{total:,}: {url}", index, total)
-            while not stop_event.is_set():
-                try:
-                    payload = client.get_json_any(cdx_endpoints(config), _exact_asset_params(config, url))
-                    captures, _ = parse_cdx(payload)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="archive-assets") as pool:
+            while completed < total:
+                batch = rows.fetchmany(batch_size)
+                if not batch:
                     break
-                except (TransientRequestError, RateLimitDeferred) as exc:
-                    # External lookups are optional. Keep the operation alive and move the
-                    # candidate to the back of a future analysis run instead of aborting.
+                eligible: list[sqlite3.Row] = []
+                blocked: list[int] = []
+                for row in batch:
+                    if stop_event.is_set():
+                        raise Stopped
+                    url = str(row["original_url"])
+                    host = (urllib.parse.urlsplit(url).hostname or "").casefold()
+                    if _external_allowed(host, analysis.external_domains):
+                        eligible.append(row)
+                    else:
+                        blocked.append(int(row["id"]))
+                if blocked:
+                    now = utc_now()
                     with database:
-                        database.execute(
-                            "UPDATE legacy_assets SET archive_status='retry',context=?,updated_at=? WHERE id=?",
-                            (f"{type(exc).__name__}: {exc}", utc_now(), row["id"]),
+                        database.executemany(
+                            "UPDATE legacy_assets SET archive_status='blocked_domain',updated_at=? WHERE id=?",
+                            ((now, row_id) for row_id in blocked),
                         )
-                    captures = []
-                    break
-            if not captures:
-                with database:
-                    database.execute(
-                        "UPDATE legacy_assets SET archive_status=CASE WHEN archive_status='retry' THEN archive_status ELSE 'not_found' END,updated_at=? WHERE id=?",
-                        (utc_now(), row["id"]),
-                    )
-                continue
-            chosen = min(captures, key=lambda item: item["timestamp"])
-            extension = extension_from_url(chosen["original"])
-            kind = media_kind(extension, chosen.get("mimetype", "")) or "asset"
-            signature = "external-asset:" + hashlib.sha256(url.encode("utf-8", "replace")).hexdigest()[:20]
-            with database:
-                upsert_media_capture(
-                    database,
-                    chosen,
-                    None,
-                    signature,
-                    kind,
-                    extension,
-                    int(row["document_id"]),
-                    "external_asset",
-                )
-                media_row = database.execute(
-                    "SELECT id FROM media_captures WHERE original_url=? AND timestamp=? AND query_signature=?",
-                    (chosen["original"], chosen["timestamp"], signature),
-                ).fetchone()
-                database.execute(
-                    "UPDATE legacy_assets SET archive_status='found',media_capture_id=?,updated_at=? WHERE id=?",
-                    (media_row["id"] if media_row else None, utc_now(), row["id"]),
-                )
-            found += 1
+                    completed += len(blocked)
+                futures = [pool.submit(lookup, row) for row in eligible]
+                results = []
+                for future in concurrent.futures.as_completed(futures):
+                    if stop_event.is_set():
+                        for pending in futures:
+                            pending.cancel()
+                        raise Stopped
+                    results.append(future.result())
+                    completed += 1
+                    if callback and (completed == total or completed % 25 == 0):
+                        _emit(callback, "asset_search", f"Searched external assets {completed:,}/{total:,}; found {found:,}", completed, total)
+                if results:
+                    now = utc_now()
+                    with database:
+                        for row, captures, error in results:
+                            if error is not None:
+                                if isinstance(error, (TransientRequestError, RateLimitDeferred)):
+                                    database.execute(
+                                        "UPDATE legacy_assets SET archive_status='retry',context=?,updated_at=? WHERE id=?",
+                                        (f"{type(error).__name__}: {error}", now, row["id"]),
+                                    )
+                                    continue
+                                raise error
+                            if not captures:
+                                database.execute(
+                                    "UPDATE legacy_assets SET archive_status='not_found',updated_at=? WHERE id=?",
+                                    (now, row["id"]),
+                                )
+                                continue
+                            chosen = captures[0]
+                            extension = extension_from_url(chosen["original"])
+                            kind = media_kind(extension, chosen.get("mimetype", "")) or "asset"
+                            url = str(row["original_url"])
+                            signature = "external-asset:" + hashlib.sha256(url.encode("utf-8", "replace")).hexdigest()[:20]
+                            upsert_media_capture(database, chosen, None, signature, kind, extension, int(row["document_id"]), "external_asset")
+                            media_row = database.execute(
+                                "SELECT id FROM media_captures WHERE original_url=? AND timestamp=? AND query_signature=?",
+                                (chosen["original"], chosen["timestamp"], signature),
+                            ).fetchone()
+                            database.execute(
+                                "UPDATE legacy_assets SET archive_status='found',media_capture_id=?,updated_at=? WHERE id=?",
+                                (media_row["id"] if media_row else None, now, row["id"]),
+                            )
+                            found += 1
     finally:
         client.close()
     return found
+
 
 
 def _write_reports(config: ProjectConfig, database: sqlite3.Connection, summary: dict) -> dict[str, Path]:
@@ -292,43 +308,54 @@ def run_analysis(
             ORDER BY d.id
             """
         )
+        thread_ids: dict[str, int] = {}
+        pending_documents = 0
         for index, row in enumerate(rows, 1):
             if stop_event.is_set():
+                if pending_documents:
+                    database.commit()
                 raise Stopped
             raw = _read_source(str(row["path"]))
             original_url = str(row["original_url"])
-            _emit(callback, "analysis", f"Analyzing document {index:,}/{document_count:,}", index, document_count)
+            now = utc_now()
+            if index == 1 or index == document_count or index % 25 == 0:
+                _emit(callback, "analysis", f"Analyzing document {index:,}/{document_count:,}", index, document_count)
             if analysis.reconstruct_threads:
                 thread = parse_forum_posts(raw, original_url, analysis.forum_profile)
                 if thread.posts:
-                    with database:
-                        database.execute(
-                            """
-                            INSERT INTO forum_threads(canonical_key,canonical_url,title,profile,first_timestamp,last_timestamp,post_count,document_count,created_at)
-                            VALUES(?,?,?,?,?,?,0,0,?)
-                            ON CONFLICT(canonical_key) DO UPDATE SET
-                                canonical_url=COALESCE(excluded.canonical_url,forum_threads.canonical_url),
-                                title=CASE WHEN LENGTH(excluded.title)>LENGTH(COALESCE(forum_threads.title,'')) THEN excluded.title ELSE forum_threads.title END,
-                                profile=excluded.profile,
-                                first_timestamp=MIN(COALESCE(forum_threads.first_timestamp,excluded.first_timestamp),excluded.first_timestamp),
-                                last_timestamp=MAX(COALESCE(forum_threads.last_timestamp,excluded.last_timestamp),excluded.last_timestamp)
-                            """,
-                            (thread.canonical_key, thread.canonical_url, thread.title, thread.profile, row["timestamp"], row["timestamp"], utc_now()),
-                        )
-                        thread_id = int(database.execute("SELECT id FROM forum_threads WHERE canonical_key=?", (thread.canonical_key,)).fetchone()["id"])
-                        for post in thread.posts:
-                            body_hash = hash_text(post.body_text.casefold())
-                            database.execute(
-                                """
-                                INSERT OR IGNORE INTO forum_posts(
-                                    thread_id,document_id,capture_id,post_key,username,posted_at,position,body_text,body_hash,source_url
-                                ) VALUES(?,?,?,?,?,?,?,?,?,?)
-                                """,
-                                (
-                                    thread_id, row["document_id"], row["capture_id"], post.post_key, post.username,
-                                    post.posted_at, post.position, post.body_text, body_hash, original_url,
-                                ),
+                    database.execute(
+                        """
+                        INSERT INTO forum_threads(canonical_key,canonical_url,title,profile,first_timestamp,last_timestamp,post_count,document_count,created_at)
+                        VALUES(?,?,?,?,?,?,0,0,?)
+                        ON CONFLICT(canonical_key) DO UPDATE SET
+                            canonical_url=COALESCE(excluded.canonical_url,forum_threads.canonical_url),
+                            title=CASE WHEN LENGTH(excluded.title)>LENGTH(COALESCE(forum_threads.title,'')) THEN excluded.title ELSE forum_threads.title END,
+                            profile=excluded.profile,
+                            first_timestamp=MIN(COALESCE(forum_threads.first_timestamp,excluded.first_timestamp),excluded.first_timestamp),
+                            last_timestamp=MAX(COALESCE(forum_threads.last_timestamp,excluded.last_timestamp),excluded.last_timestamp)
+                        """,
+                        (thread.canonical_key, thread.canonical_url, thread.title, thread.profile, row["timestamp"], row["timestamp"], now),
+                    )
+                    thread_id = thread_ids.get(thread.canonical_key)
+                    if thread_id is None:
+                        thread_id = int(database.execute(
+                            "SELECT id FROM forum_threads WHERE canonical_key=?", (thread.canonical_key,)
+                        ).fetchone()["id"])
+                        thread_ids[thread.canonical_key] = thread_id
+                    database.executemany(
+                        """
+                        INSERT OR IGNORE INTO forum_posts(
+                            thread_id,document_id,capture_id,post_key,username,posted_at,position,body_text,body_hash,source_url
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            (
+                                thread_id, row["document_id"], row["capture_id"], post.post_key, post.username,
+                                post.posted_at, post.position, post.body_text, hash_text(post.body_text.casefold()), original_url,
                             )
+                            for post in thread.posts
+                        ),
+                    )
             if not forum_only:
                 links = json_value(row["links_json"], [])
                 fields = {
@@ -339,37 +366,47 @@ def run_analysis(
                     "links": "\n".join(str(value) for value in links),
                 }
                 hits = run_extractors(fields, custom_rules)
-                with database:
-                    for hit in hits:
-                        database.execute(
-                            """
-                            INSERT INTO extractions(document_id,extractor_name,extractor_type,field,value,context,start_offset,end_offset,created_at)
-                            VALUES(?,?,?,?,?,?,?,?,?)
-                            """,
+                if hits:
+                    database.executemany(
+                        """
+                        INSERT INTO extractions(document_id,extractor_name,extractor_type,field,value,context,start_offset,end_offset,created_at)
+                        VALUES(?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
                             (
                                 row["document_id"], hit.name, hit.extractor_type, hit.field, hit.value,
-                                hit.context, hit.start, hit.end, utc_now(),
-                            ),
-                        )
+                                hit.context, hit.start, hit.end, now,
+                            )
+                            for hit in hits
+                        ),
+                    )
                 if analysis.extract_legacy_embeds:
                     candidates = extract_embed_candidates(raw, original_url)
                     source_host = (urllib.parse.urlsplit(original_url).hostname or "").casefold()
-                    with database:
-                        for candidate in candidates:
-                            candidate_host = (urllib.parse.urlsplit(candidate.url).hostname or "").casefold()
-                            external = bool(candidate_host and candidate_host != source_host and candidate_host not in hosts)
-                            database.execute(
-                                """
-                                INSERT OR IGNORE INTO legacy_assets(
-                                    document_id,original_url,resolved_url,asset_type,player,external,archive_status,context,created_at,updated_at
-                                ) VALUES(?,?,?,?,?,?, 'discovered',?,?,?)
-                                """,
-                                (
-                                    row["document_id"], candidate.url, candidate.url, candidate.asset_type,
-                                    candidate.player, int(external), candidate.context, utc_now(), utc_now(),
-                                ),
-                            )
+                    asset_rows = []
+                    for candidate in candidates:
+                        candidate_host = (urllib.parse.urlsplit(candidate.url).hostname or "").casefold()
+                        external = bool(candidate_host and candidate_host != source_host and candidate_host not in hosts)
+                        asset_rows.append((
+                            row["document_id"], candidate.url, candidate.url, candidate.asset_type,
+                            candidate.player, int(external), candidate.context, now, now,
+                        ))
+                    if asset_rows:
+                        database.executemany(
+                            """
+                            INSERT OR IGNORE INTO legacy_assets(
+                                document_id,original_url,resolved_url,asset_type,player,external,archive_status,context,created_at,updated_at
+                            ) VALUES(?,?,?,?,?,?, 'discovered',?,?,?)
+                            """,
+                            asset_rows,
+                        )
             summary["documents_processed"] = int(summary["documents_processed"]) + 1
+            pending_documents += 1
+            if pending_documents >= 100:
+                database.commit()
+                pending_documents = 0
+        if pending_documents:
+            database.commit()
 
         with database:
             database.execute(

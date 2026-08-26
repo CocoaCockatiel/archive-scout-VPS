@@ -212,9 +212,10 @@ def fetch_parse_scan(row: sqlite3.Row, config: ProjectConfig, jobs: list[ScanJob
     # The dedicated media-discovery pass still rechecks the saved page with tag
     # context, but persisting these URLs here avoids losing embeds that are only
     # represented in FlashVars or old JavaScript player configuration.
-    embed_urls = {candidate.url for candidate in extract_embed_candidates(raw, original)}
-    if embed_urls:
-        links = sorted(set(links).union(embed_urls))
+    if config.media.enabled and config.media.discover_embedded:
+        embed_urls = {candidate.url for candidate in extract_embed_candidates(raw, original)}
+        if embed_urls:
+            links = sorted(set(links).union(embed_urls))
     prepared_fields, prepared_normalized_fields = prepare_analysis_fields(original, title, visible, raw, links)
     analyses = {
         job.scan_run_id: analyze_content(
