@@ -10,10 +10,11 @@ MARK OF THE WEB / UNBLOCK
 Windows normally marks ZIP files downloaded from the internet. After verifying the source, checksum, and signature, right-click the ZIP, choose Properties, and select Unblock when that option is present before extracting it.
 
 RUN WITHOUT INSTALLING
-Open the extracted ArchiveScout folder and run ArchiveScout.exe.
+Open the extracted ArchiveScout folder and run ArchiveScout.exe for the desktop app.
+For automation, run ArchiveScoutCLI\ArchiveScoutCLI.exe --help from a console.
 
 OPTIONAL INSTALLER
-The included Install Archive Scout.cmd copies the application to the current user's local Programs folder and creates shortcuts. It does not require administrator access.
+The included Install Archive Scout.cmd copies both the GUI and automation CLI to the current user's local Programs folder and creates GUI shortcuts. It also creates archive-scout.cmd beside the installed GUI for scripted use. It does not require administrator access.
 
 DEFENDER FALSE POSITIVES
 Do not disable Defender globally. Record the detection, verify the checksum and signature, and submit the exact flagged release file to Microsoft as a clean-software false positive. A signature and checksum establish publisher/file integrity but cannot force an antivirus classification.

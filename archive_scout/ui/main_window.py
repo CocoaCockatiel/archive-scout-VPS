@@ -19,7 +19,7 @@ from ..ai.relevance import AIReviewError, run_ai_review
 from ..ai.reports import generate_ai_reports
 from ..cdx.client import RateLimitDeferred
 from ..cdx.parameters import build_cdx_params, cdx_year_window
-from ..config import AIConfig, AnalysisConfig, KeywordSetConfig, MediaConfig, NetworkConfig, ProjectConfig, load_project_config, save_project_config
+from ..config import AIConfig, AnalysisConfig, KeywordSetConfig, MediaConfig, NetworkConfig, ProjectConfig, ResearchConfig, load_project_config, save_project_config
 from ..constants import APP_NAME, CDX_URL, DEFAULT_IMAGE_EXTENSIONS, DEFAULT_VIDEO_EXTENSIONS, OPERATION_MODES, REVIEW_STATUSES, SCOPE_LABELS, VERSION
 from ..database.connection import open_database
 from ..database.repositories import (
@@ -46,6 +46,8 @@ from ..operations import run_project
 from ..reports.compare import generate_scan_comparison
 from ..reports.export import export_review_package, export_scan
 from ..reports.text import generate_reports
+from ..research.ai import run_grounded_answer
+from ..research.search import search_research
 from ..runtime import FrozenBundleError, bundled_resource, ensure_frozen_bundle_available
 from ..scanning.full_text import search_documents
 from ..utils import normalize_cdx_date
@@ -75,6 +77,7 @@ MODE_HELP = {
     "media_download": "Downloads pending media records already stored in this project.",
     "media_retry": "Retries only unresolved media download errors.",
     "analysis": "Reconstructs forum threads, extracts identifiers and legacy embeds, clusters duplicates, compares snapshots, and builds provenance reports.",
+    "research_index": "Builds or refreshes the local Research Intelligence vector, entity, duplicate, and evidence-relationship index without making Wayback requests.",
     "forum_rebuild": "Rebuilds forum threads and posts from saved pages without rerunning the rest of the archive analysis.",
     "merge_project": "Merges captures, downloads, scans, reviews, notes, tags, media, and extraction results from another Archive Scout project.",
 }
@@ -132,6 +135,7 @@ class ArchiveScoutApp(tk.Tk):
         self.site_issue_row_map: dict[str, dict] = {}
         self.ai_run_map: dict[str, int] = {}
         self.ai_result_row_map: dict[str, dict] = {}
+        self.research_result_row_map: dict[str, dict] = {}
         self.result_sort_column = "score"
         self.result_sort_reverse = True
         self.target_settings: dict[str, dict] = {}
@@ -180,7 +184,7 @@ class ArchiveScoutApp(tk.Tk):
         self.cdx_match_type_var = tk.StringVar(value="Automatic")
         self.collapse_urlkey_var = tk.BooleanVar(value=True)
         self.collapse_digest_var = tk.BooleanVar(value=False)
-        self.page_size_var = tk.StringVar(value="50000")
+        self.page_size_var = tk.StringVar(value="100000")
         self.workers_var = tk.StringVar(value=str(min(4, max(2, cpu_count))))
         self.max_file_var = tk.StringVar(value="25")
         self.minimum_score_var = tk.StringVar(value="1")
@@ -197,7 +201,7 @@ class ArchiveScoutApp(tk.Tk):
         self.network_backend_var = tk.StringVar(value="auto")
         self.network_endpoint_var = tk.StringVar(value="auto")
         self.network_strategy_var = tk.StringVar(value="auto")
-        self.network_page_blocks_var = tk.StringVar(value="9")
+        self.network_page_blocks_var = tk.StringVar(value="0")
         self.network_cdx_workers_var = tk.StringVar(value="10")
         self.network_trust_env_var = tk.BooleanVar(value=True)
         self.network_persistent_var = tk.BooleanVar(value=True)
@@ -235,11 +239,16 @@ class ArchiveScoutApp(tk.Tk):
         self.ai_scan_var = tk.StringVar()
         self.ai_run_var = tk.StringVar()
         self.ai_api_key_var = tk.StringVar()
+        self.ai_provider_var = tk.StringVar(value="openai")
         self.ai_model_var = tk.StringVar(value="gpt-5-mini")
         self.ai_candidate_limit_var = tk.StringVar(value="200")
         self.ai_batch_size_var = tk.StringVar(value="8")
         self.ai_min_relevance_var = tk.StringVar(value="50")
         self.ai_excerpt_chars_var = tk.StringVar(value="5000")
+        self.research_query_var = tk.StringVar()
+        self.research_backend_var = tk.StringVar(value="local-hash")
+        self.research_auto_var = tk.BooleanVar(value=True)
+        self.research_limit_var = tk.StringVar(value="100")
         self.error_category_var = tk.StringVar(value="All")
         self.forum_profile_var = tk.StringVar(value="auto")
         self.analysis_threads_var = tk.BooleanVar(value=True)
@@ -309,6 +318,7 @@ class ArchiveScoutApp(tk.Tk):
         self.create_settings_tab()
         self.create_results_tab()
         self.create_ai_tab()
+        self.create_research_tab()
         self.create_history_tab()
         self.create_errors_tab()
         self.create_activity_tab()
@@ -383,7 +393,7 @@ class ArchiveScoutApp(tk.Tk):
         self.bind_all(f"<{modifier}-f>", lambda _e: self.show_page("Results and search"))
 
     def refresh_navigation(self) -> None:
-        allowed_simple = {"Dashboard", "Sites and paths", "Keyword sets", "Results and search", "AI relevance", "Errors", "Activity"}
+        allowed_simple = {"Dashboard", "Sites and paths", "Keyword sets", "Results and search", "AI relevance", "Research intelligence", "Errors", "Activity"}
         for button in self.nav_buttons.values():
             button.destroy()
         self.nav_buttons.clear()
@@ -600,7 +610,7 @@ class ArchiveScoutApp(tk.Tk):
         collapse.grid(row=4, column=1, sticky="w", padx=(10, 0), pady=4)
         ttk.Checkbutton(collapse, text="collapse=urlkey", variable=self.collapse_urlkey_var).grid(row=0, column=0)
         ttk.Checkbutton(collapse, text="collapse=digest", variable=self.collapse_digest_var).grid(row=0, column=1, padx=(18, 0))
-        ttk.Label(tab, text="Results per CDX page:").grid(row=5, column=0, sticky="w", pady=4)
+        ttk.Label(tab, text="Resume batch size (CDX rows):").grid(row=5, column=0, sticky="w", pady=4)
         ttk.Entry(tab, textvariable=self.page_size_var, width=22).grid(row=5, column=1, sticky="w", padx=(10, 0), pady=4)
         options = ttk.Frame(tab)
         options.grid(row=6, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
@@ -759,14 +769,14 @@ class ArchiveScoutApp(tk.Tk):
         network_rows = [
             ("Connection backend", self.network_backend_var, ("auto", "httpx", "urllib3", "curl")),
             ("CDX endpoint", self.network_endpoint_var, ("auto", "cdx", "timemap")),
-            ("Index strategy", self.network_strategy_var, ("auto", "paged", "resume")),
+            ("Index strategy (auto = fast resume)", self.network_strategy_var, ("auto", "resume", "paged")),
         ]
         for row, (label, variable, values) in enumerate(network_rows, start=1):
             ttk.Label(tab, text=label + ":").grid(row=row, column=2, sticky="w", pady=4)
             ttk.Combobox(tab, textvariable=variable, values=values, state="readonly", width=18).grid(row=row, column=3, sticky="w", padx=(10, 0), pady=4)
         numeric = [
-            ("Parallel CDX page requests", self.network_cdx_workers_var),
-            ("CDX page blocks", self.network_page_blocks_var),
+            ("Parallel CDX requests", self.network_cdx_workers_var),
+            ("Numbered-paging blocks (paged only)", self.network_page_blocks_var),
             ("Retry base (seconds)", self.network_retry_base_var),
             ("Retry ceiling (seconds)", self.network_retry_max_var),
             ("Failures before graceful pause", self.network_failure_limit_var),
@@ -888,7 +898,7 @@ class ArchiveScoutApp(tk.Tk):
             tab,
             text=(
                 "After a normal scan, describe what you are actually searching for. Archive Scout selects a bounded set of "
-                "existing report matches, sends compact excerpts to OpenAI, and stores a separate explainable relevance ranking. "
+                "existing report matches, sends compact excerpts to the configured OpenAI or OpenRouter provider, and stores a separate explainable relevance ranking. "
                 "Deterministic Archive Scout scores and reviews are never replaced."
             ),
             style="Muted.TLabel", wraplength=1080,
@@ -908,14 +918,18 @@ class ArchiveScoutApp(tk.Tk):
         ttk.Label(settings, text="Minimum relevance:").grid(row=0, column=6)
         ttk.Entry(settings, textvariable=self.ai_min_relevance_var, width=6).grid(row=0, column=7, padx=(5, 0))
 
-        ttk.Label(settings, text="OpenAI API key:").grid(row=1, column=0, sticky="w", pady=(7, 0))
+        ttk.Label(settings, text="Provider:").grid(row=1, column=0, sticky="w", pady=(7, 0))
+        provider_box = ttk.Combobox(settings, textvariable=self.ai_provider_var, values=("openai", "openrouter"), state="readonly", width=14)
+        provider_box.grid(row=1, column=1, sticky="w", padx=(5, 12), pady=(7, 0))
+        provider_box.bind("<<ComboboxSelected>>", lambda _e: self.on_ai_provider_changed())
+        ttk.Label(settings, text="API key:").grid(row=1, column=2, sticky="e", pady=(7, 0))
         key_entry = ttk.Entry(settings, textvariable=self.ai_api_key_var, show="•")
-        key_entry.grid(row=1, column=1, columnspan=2, sticky="ew", padx=(5, 12), pady=(7, 0))
+        key_entry.grid(row=1, column=3, columnspan=2, sticky="ew", padx=(5, 12), pady=(7, 0))
         ttk.Label(
             settings,
-            text="Session only — Archive Scout does not write this key to project.json or application settings.",
+            text="Session only; environment variables are also supported. Keys are never written to the project.",
             style="Muted.TLabel",
-        ).grid(row=1, column=3, columnspan=5, sticky="w", pady=(7, 0))
+        ).grid(row=1, column=5, columnspan=3, sticky="w", pady=(7, 0))
 
         prompt_frame = ttk.LabelFrame(tab, text="What are you searching for?", padding=8)
         prompt_frame.grid(row=3, column=0, sticky="ew", pady=(10, 8))
@@ -964,6 +978,68 @@ class ArchiveScoutApp(tk.Tk):
         ttk.Button(bottom, text="Open local", command=self.open_selected_ai_local).grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Button(bottom, text="Open Wayback", command=self.open_selected_ai_wayback).grid(row=1, column=1, sticky="w", padx=5, pady=(6, 0))
         ttk.Button(bottom, text="Copy URL", command=self.copy_selected_ai_url).grid(row=1, column=2, sticky="w", padx=5, pady=(6, 0))
+        pane.add(bottom, weight=1)
+
+    def create_research_tab(self) -> None:
+        tab = ttk.Frame(self.notebook, padding=10)
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(4, weight=1)
+        self.notebook.add(tab, text="Research intelligence")
+        ttk.Label(tab, text="Research Intelligence", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            tab,
+            text=(
+                "Search the entire saved project as one evidence corpus. Archive Scout combines a local vector index, full-text search, "
+                "entities, duplicate clusters, archive scores, and page-to-page relationships. Deep review is optional and sends only a "
+                "bounded evidence set to your selected AI provider; archived text is always treated as untrusted source material."
+            ),
+            style="Muted.TLabel", wraplength=1080,
+        ).grid(row=1, column=0, sticky="ew", pady=(2, 8))
+        settings = ttk.Frame(tab)
+        settings.grid(row=2, column=0, sticky="ew")
+        settings.columnconfigure(1, weight=1)
+        ttk.Label(settings, text="Local vector backend:").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(settings, textvariable=self.research_backend_var, values=("local-hash", "fastembed"), state="readonly", width=16).grid(row=0, column=1, sticky="w", padx=(5, 12))
+        ttk.Checkbutton(settings, text="Refresh research index after normal scans", variable=self.research_auto_var).grid(row=0, column=2, sticky="w", padx=(0, 12))
+        ttk.Label(settings, text="Result limit:").grid(row=0, column=3, sticky="e")
+        ttk.Entry(settings, textvariable=self.research_limit_var, width=7).grid(row=0, column=4, padx=(5, 0))
+
+        query = ttk.LabelFrame(tab, text="Research question", padding=8)
+        query.grid(row=3, column=0, sticky="ew", pady=(10, 8))
+        query.columnconfigure(0, weight=1)
+        ttk.Entry(query, textvariable=self.research_query_var).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.research_search_button = ttk.Button(query, text="Search evidence", command=self.start_research_search_ui, style="Accent.TButton")
+        self.research_search_button.grid(row=0, column=1, padx=3)
+        self.research_ai_button = ttk.Button(query, text="Deep AI review", command=self.start_research_ai_ui)
+        self.research_ai_button.grid(row=0, column=2, padx=3)
+        self.research_index_button = ttk.Button(query, text="Build / refresh index", command=self.start_research_index_ui)
+        self.research_index_button.grid(row=0, column=3, padx=(8, 0))
+
+        pane = ttk.Panedwindow(tab, orient="vertical")
+        pane.grid(row=4, column=0, sticky="nsew")
+        top = ttk.Frame(pane)
+        top.columnconfigure(0, weight=1)
+        top.rowconfigure(0, weight=1)
+        columns = ("score", "vector", "archive", "timestamp", "title", "url")
+        self.research_results_tree = ttk.Treeview(top, columns=columns, show="headings", selectmode="browse")
+        widths = {"score": 72, "vector": 72, "archive": 72, "timestamp": 120, "title": 260, "url": 420}
+        for column in columns:
+            self.research_results_tree.heading(column, text=column.title())
+            self.research_results_tree.column(column, width=widths[column], anchor="w")
+        self.research_results_tree.grid(row=0, column=0, sticky="nsew")
+        self.research_results_tree.bind("<<TreeviewSelect>>", self.load_selected_research_result)
+        scroll = ttk.Scrollbar(top, orient="vertical", command=self.research_results_tree.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.research_results_tree.configure(yscrollcommand=scroll.set)
+        pane.add(top, weight=3)
+
+        bottom = ttk.Frame(pane, padding=(0, 6, 0, 0))
+        bottom.columnconfigure(0, weight=1)
+        bottom.rowconfigure(0, weight=1)
+        self.research_detail_text = tk.Text(bottom, height=9, wrap="word", state="disabled")
+        self.research_detail_text.grid(row=0, column=0, columnspan=3, sticky="nsew")
+        ttk.Button(bottom, text="Open Wayback", command=self.open_selected_research_wayback).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Button(bottom, text="Copy URL", command=self.copy_selected_research_url).grid(row=1, column=1, sticky="w", padx=5, pady=(6, 0))
         pane.add(bottom, weight=1)
 
     def create_history_tab(self) -> None:
@@ -1176,12 +1252,18 @@ class ArchiveScoutApp(tk.Tk):
                 merge_source=self.analysis_merge_source_var.get(),
             )
             ai = AIConfig(
-                provider="openai",
+                provider=self.ai_provider_var.get(),
                 model=self.ai_model_var.get(),
                 candidate_limit=int(self.ai_candidate_limit_var.get()),
                 batch_size=int(self.ai_batch_size_var.get()),
                 minimum_relevance=int(self.ai_min_relevance_var.get()),
                 excerpt_chars=int(self.ai_excerpt_chars_var.get()),
+            )
+            research = ResearchConfig(
+                enabled=True,
+                auto_build=self.research_auto_var.get(),
+                vector_backend=self.research_backend_var.get(),
+                result_limit=int(self.research_limit_var.get()),
             )
             network = NetworkConfig(
                 backend=self.network_backend_var.get(),
@@ -1224,6 +1306,7 @@ class ArchiveScoutApp(tk.Tk):
                 media=media,
                 analysis=analysis,
                 ai=ai,
+                research=research,
                 network=network,
                 target_settings=self.target_settings,
                 auto_backup=self.auto_backup_var.get(),
@@ -1295,6 +1378,9 @@ class ArchiveScoutApp(tk.Tk):
         self.start_button.configure(state="disabled")
         if hasattr(self, "ai_start_button"):
             self.ai_start_button.configure(state="disabled")
+        for name in ("research_search_button", "research_ai_button", "research_index_button"):
+            if hasattr(self, name):
+                getattr(self, name).configure(state="disabled")
         self.stop_button.configure(state="normal")
         self.log(f"Starting {mode} in {config.output_dir}")
         self.worker_thread = threading.Thread(target=self.run_worker, args=(config, mode), daemon=True)
@@ -1359,6 +1445,21 @@ class ArchiveScoutApp(tk.Tk):
                     self.finish_run()
                     self.refresh_ai_runs(select_run_id=run_id)
                     messagebox.showinfo(APP_NAME, "AI relevance review is complete. The most relevant pages are displayed in AI relevance.")
+                elif kind == "research_results":
+                    self.progress.stop()
+                    self.progress.configure(mode="determinate")
+                    self.progress_var.set(100)
+                    self.populate_research_results(payload)
+                    self.status_var.set(f"Research search complete: {len(payload):,} results")
+                    self.finish_run()
+                elif kind == "research_ai_complete":
+                    self.progress.stop()
+                    self.progress.configure(mode="determinate")
+                    self.progress_var.set(100)
+                    self.populate_research_results(payload.get("evidence") or [])
+                    self.show_research_answer(payload)
+                    self.status_var.set("Grounded AI review complete")
+                    self.finish_run()
                 elif kind == "stopped":
                     self.progress.stop()
                     self.status_var.set("Stopped. Progress was saved.")
@@ -1394,6 +1495,9 @@ class ArchiveScoutApp(tk.Tk):
         self.start_button.configure(state="normal")
         if hasattr(self, "ai_start_button"):
             self.ai_start_button.configure(state="normal")
+        for name in ("research_search_button", "research_ai_button", "research_index_button"):
+            if hasattr(self, name):
+                getattr(self, name).configure(state="normal")
         self.stop_button.configure(state="disabled")
         self.save_app_state()
 
@@ -1622,6 +1726,175 @@ class ArchiveScoutApp(tk.Tk):
             )
         finally:
             database.close()
+
+    def on_ai_provider_changed(self) -> None:
+        provider = self.ai_provider_var.get().strip().casefold()
+        current = self.ai_model_var.get().strip()
+        if provider == "openrouter" and (not current or current == "gpt-5-mini"):
+            self.ai_model_var.set("anthropic/claude-sonnet-4.5")
+        elif provider == "openai" and (not current or current.startswith("anthropic/")):
+            self.ai_model_var.set("gpt-5-mini")
+
+    def start_research_index_ui(self) -> None:
+        try:
+            config = self.build_config(require_keywords=False)
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, str(exc))
+            return
+        self.start(config, "research_index")
+
+    def _begin_research_worker(self, target, args: tuple, status: str) -> None:
+        if self.worker_thread and self.worker_thread.is_alive():
+            messagebox.showinfo(APP_NAME, "Another operation is already running. Let it finish or stop it first.")
+            return
+        self.stop_event.clear()
+        self.progress_var.set(0)
+        self.status_var.set(status)
+        self.start_button.configure(state="disabled")
+        if hasattr(self, "ai_start_button"):
+            self.ai_start_button.configure(state="disabled")
+        for name in ("research_search_button", "research_ai_button", "research_index_button"):
+            if hasattr(self, name):
+                getattr(self, name).configure(state="disabled")
+        self.stop_button.configure(state="normal")
+        self.worker_thread = threading.Thread(target=target, args=args, daemon=True)
+        self.worker_thread.start()
+
+    def start_research_search_ui(self) -> None:
+        try:
+            config = self.build_config(require_keywords=False)
+            query = self.research_query_var.get().strip()
+            if not query:
+                raise ValueError("Describe what you are searching for.")
+            limit = int(self.research_limit_var.get())
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, str(exc))
+            return
+        self._begin_research_worker(self.run_research_search_worker, (config, query, limit), "Searching Research Intelligence…")
+
+    def run_research_search_worker(self, config: ProjectConfig, query: str, limit: int) -> None:
+        database = None
+        try:
+            database = open_database(config.output_dir, migrate=True)
+            results = [item.to_dict() for item in search_research(config, database, query, limit)]
+            self.events.put(("research_results", results))
+        except Stopped:
+            self.events.put(("stopped", None))
+        except Exception:
+            self.events.put(("error", traceback.format_exc()))
+        finally:
+            if database is not None:
+                database.close()
+
+    def start_research_ai_ui(self) -> None:
+        try:
+            config = self.build_config(require_keywords=False)
+            query = self.research_query_var.get().strip()
+            if not query:
+                raise ValueError("Describe the research question before starting deep review.")
+            api_key = self.ai_api_key_var.get().strip()
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, str(exc))
+            return
+        self._begin_research_worker(self.run_research_ai_worker, (config, query, api_key), "Starting grounded AI review…")
+
+    def run_research_ai_worker(self, config: ProjectConfig, query: str, api_key: str) -> None:
+        database = None
+        try:
+            database = open_database(config.output_dir, migrate=True)
+            answer = run_grounded_answer(
+                config, database, query, api_key=api_key, stop_event=self.stop_event, callback=self.on_engine_event
+            )
+            self.events.put(("research_ai_complete", answer.to_dict()))
+        except Stopped:
+            self.events.put(("stopped", None))
+        except Exception:
+            self.events.put(("error", traceback.format_exc()))
+        finally:
+            if database is not None:
+                database.close()
+
+    def populate_research_results(self, rows: list[dict]) -> None:
+        if not hasattr(self, "research_results_tree"):
+            return
+        self.research_results_tree.delete(*self.research_results_tree.get_children())
+        self.research_result_row_map.clear()
+        for row in rows:
+            item = self.research_results_tree.insert(
+                "", "end",
+                values=(
+                    f"{float(row.get('score') or 0) * 100:.1f}",
+                    f"{float(row.get('vector_score') or 0) * 100:.1f}",
+                    f"{float(row.get('archive_score') or 0) * 100:.1f}",
+                    row.get("timestamp") or "",
+                    row.get("title") or "(untitled)",
+                    row.get("original_url") or "",
+                ),
+            )
+            self.research_result_row_map[item] = dict(row)
+        children = self.research_results_tree.get_children()
+        if children:
+            self.research_results_tree.selection_set(children[0])
+            self.load_selected_research_result()
+
+    def selected_research_result(self) -> dict | None:
+        selected = self.research_results_tree.selection() if hasattr(self, "research_results_tree") else ()
+        return self.research_result_row_map.get(selected[0]) if selected else None
+
+    def load_selected_research_result(self, _event=None) -> None:
+        row = self.selected_research_result()
+        if not row:
+            return
+        entities = ", ".join(f"{item.get('kind')}:{item.get('value')}" for item in (row.get("entities") or [])[:12])
+        related = ", ".join(str(value) for value in (row.get("related_document_ids") or [])[:12])
+        relationship_lines = []
+        for item in (row.get("relationships") or [])[:12]:
+            relationship_lines.append(
+                f"  {item.get('timestamp') or 'unknown time'} | {item.get('edge_type') or 'related'} | "
+                f"doc {item.get('related_document_id')} | {item.get('title') or item.get('original_url') or ''}"
+            )
+        timeline = "\n".join(relationship_lines) or "  —"
+        detail = (
+            f"Research score: {float(row.get('score') or 0) * 100:.1f}/100\n"
+            f"Vector similarity: {float(row.get('vector_score') or 0) * 100:.1f}/100\n"
+            f"Full-text component: {float(row.get('text_score') or 0) * 100:.1f}/100\n"
+            f"Entity component: {float(row.get('entity_score') or 0) * 100:.1f}/100\n"
+            f"Archive Scout evidence component: {float(row.get('archive_score') or 0) * 100:.1f}/100\n"
+            f"Document ID: {row.get('document_id')}\n"
+            f"Duplicate group: {row.get('duplicate_group_id') or '—'}\n"
+            f"Related documents: {related or '—'}\n"
+            f"Entities: {entities or '—'}\n\n"
+            f"Evidence graph / timeline\n{timeline}\n\n"
+            f"Evidence excerpt\n{row.get('snippet') or ''}"
+        )
+        self.research_detail_text.configure(state="normal")
+        self.research_detail_text.delete("1.0", "end")
+        self.research_detail_text.insert("1.0", detail)
+        self.research_detail_text.configure(state="disabled")
+
+    def show_research_answer(self, payload: dict) -> None:
+        claims = payload.get("claims") or []
+        lines = ["AI interpretation (citation-grounded)", "", str(payload.get("answer") or ""), "", "Claims"]
+        for claim in claims:
+            ids = ", ".join(str(value) for value in claim.get("support_ids") or [])
+            lines.append(f"• {claim.get('text') or ''} [documents {ids}] confidence={float(claim.get('confidence') or 0):.2f}")
+            if claim.get("uncertainty"):
+                lines.append(f"  Uncertainty: {claim['uncertainty']}")
+        self.research_detail_text.configure(state="normal")
+        self.research_detail_text.delete("1.0", "end")
+        self.research_detail_text.insert("1.0", "\n".join(lines))
+        self.research_detail_text.configure(state="disabled")
+
+    def open_selected_research_wayback(self) -> None:
+        row = self.selected_research_result()
+        if row:
+            webbrowser.open(replay_url(str(row.get("timestamp") or ""), str(row.get("original_url") or "")))
+
+    def copy_selected_research_url(self) -> None:
+        row = self.selected_research_result()
+        if row:
+            self.clipboard_clear()
+            self.clipboard_append(str(row.get("original_url") or ""))
 
     def current_ai_scan_id(self) -> int | None:
         return self.scan_run_map.get(self.ai_scan_var.get())
@@ -2024,11 +2297,16 @@ class ArchiveScoutApp(tk.Tk):
         self.media_max_var.set(str(media.max_file_mb))
         self.media_preserve_var.set(media.preserve_paths)
         ai = config.ai.normalized()
+        self.ai_provider_var.set(ai.provider)
         self.ai_model_var.set(ai.model)
         self.ai_candidate_limit_var.set(str(ai.candidate_limit))
         self.ai_batch_size_var.set(str(ai.batch_size))
         self.ai_min_relevance_var.set(str(ai.minimum_relevance))
         self.ai_excerpt_chars_var.set(str(ai.excerpt_chars))
+        research = config.research.normalized()
+        self.research_backend_var.set(research.vector_backend)
+        self.research_auto_var.set(research.auto_build)
+        self.research_limit_var.set(str(research.result_limit))
         analysis = config.analysis
         self.forum_profile_var.set(analysis.forum_profile)
         self.analysis_threads_var.set(analysis.reconstruct_threads)

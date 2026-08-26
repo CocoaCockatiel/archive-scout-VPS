@@ -27,6 +27,7 @@ from .projects.importers import import_text_folder
 from .constants import VERSION
 from .projects.merge import merge_projects
 from .reports.text import generate_reports
+from .research.index import build_research_index
 from .scanning.jobs import ScanJob
 from .scanning.rescanner import rescan_keyword_sets
 
@@ -34,7 +35,7 @@ SUPPORTED_MODES = {
     "all", "external_media_after_scan", "index", "download", "resume", "rescan", "retry_errors", "report", "integrity",
     "repair", "backup", "diagnostics", "import_folder",
     "media_all", "media_index", "media_download", "media_retry",
-    "analysis", "forum_rebuild", "merge_project",
+    "analysis", "research_index", "forum_rebuild", "merge_project",
 }
 
 
@@ -127,16 +128,23 @@ def run_project(
     original_callback = callback
     owner_thread_id = threading.get_ident()
     last_progress_write = 0.0
+    last_progress_stage = ""
 
     def operation_callback(event: ProgressEvent) -> None:
-        nonlocal last_progress_write
+        nonlocal last_progress_write, last_progress_stage
         if threading.get_ident() == owner_thread_id:
             now = time.monotonic()
-            should_write = (
+            completed_boundary = (
                 event.current is not None
-                or event.total is not None
-                or now - last_progress_write >= 0.5
+                and event.total is not None
+                and event.total >= 0
+                and event.current >= event.total
             )
+            stage_changed = bool(event.stage) and event.stage != last_progress_stage
+            # UI/bot callbacks still receive every event immediately. Persisted
+            # operation progress is rate-limited so a fast download/scan no longer
+            # forces a full SQLite commit for every single completed item.
+            should_write = stage_changed or completed_boundary or now - last_progress_write >= 0.75
             if should_write:
                 update_operation_run(
                     database,
@@ -148,6 +156,7 @@ def run_project(
                 )
                 database.commit()
                 last_progress_write = now
+                last_progress_stage = event.stage
         if original_callback:
             original_callback(event)
 
@@ -193,6 +202,14 @@ def run_project(
             finish_operation_run(database, operation_run_id, "complete", "Analysis complete")
             database.commit()
             return paths
+        if mode == "research_index":
+            summary = build_research_index(config, database, stop_event, callback)
+            report = config.output_dir / "reports" / "research_index.json"
+            import json as _json
+            report.write_text(_json.dumps(summary.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            finish_operation_run(database, operation_run_id, "complete", "Research Intelligence index complete")
+            database.commit()
+            return {"research_index": report}
         if mode == "forum_rebuild":
             paths = run_analysis(config, database, stop_event, callback, forum_only=True)
             finish_operation_run(database, operation_run_id, "complete", "Forum rebuild complete")
@@ -310,6 +327,12 @@ def run_project(
             index_media(config, database, stop_event, callback)
             download_media(config, database, stop_event, callback)
             paths.update(generate_media_reports(config, database))
+        if config.research.enabled and config.research.auto_build:
+            research_summary = build_research_index(config, database, stop_event, callback)
+            research_report = config.output_dir / "reports" / "research_index.json"
+            import json as _json
+            research_report.write_text(_json.dumps(research_summary.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            paths["research_index"] = research_report
         emit(callback, ProgressEvent("report", f"Reports written to {config.output_dir / 'reports'}"))
         finish_operation_run(database, operation_run_id, "complete", "Operation complete")
         database.commit()

@@ -86,7 +86,7 @@ class CDXResponseRecoveryTests(unittest.TestCase):
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(transport.urls[1]).query)
         self.assertEqual(query["output"], ["txt"])
         self.assertEqual(query["gzip"], ["false"])
-        self.assertEqual(query["fl"], ["timestamp,mimetype,statuscode,digest,length,original"])
+        self.assertEqual(query["fl"], ["urlkey,timestamp,mimetype,statuscode,digest,length,original"])
 
     def test_page_count_text_fallback_is_numeric(self) -> None:
         params = cdx_text_fallback_params([

@@ -134,20 +134,57 @@ class AIConfig:
     minimum_relevance: int = 50
     excerpt_chars: int = 5000
     request_timeout: float = 120.0
+    max_output_tokens: int = 1600
 
     def normalized(self) -> "AIConfig":
         provider = self.provider.strip().casefold() or "openai"
-        if provider != "openai":
-            raise ValueError("AI provider must be openai")
-        model = self.model.strip() or "gpt-5-mini"
+        if provider not in {"openai", "openrouter"}:
+            raise ValueError("AI provider must be openai or openrouter")
+        default_model = "anthropic/claude-sonnet-4.5" if provider == "openrouter" else "gpt-5-mini"
+        model = self.model.strip() or default_model
         return AIConfig(
             provider=provider,
             model=model,
-            candidate_limit=min(2000, max(10, int(self.candidate_limit))),
+            candidate_limit=min(5000, max(10, int(self.candidate_limit))),
             batch_size=min(20, max(1, int(self.batch_size))),
             minimum_relevance=min(100, max(0, int(self.minimum_relevance))),
-            excerpt_chars=min(12000, max(1000, int(self.excerpt_chars))),
+            excerpt_chars=min(16000, max(1000, int(self.excerpt_chars))),
             request_timeout=min(600.0, max(15.0, float(self.request_timeout))),
+            max_output_tokens=min(12000, max(256, int(self.max_output_tokens))),
+        )
+
+    def to_payload(self) -> dict:
+        return asdict(self.normalized())
+
+
+@dataclass(slots=True)
+class ResearchConfig:
+    enabled: bool = True
+    auto_build: bool = True
+    vector_backend: str = "local-hash"
+    vector_dimensions: int = 256
+    candidate_limit: int = 3000
+    result_limit: int = 200
+    excerpt_chars: int = 3600
+    entity_extraction: bool = True
+    duplicate_clustering: bool = True
+    ai_evidence_limit: int = 24
+
+    def normalized(self) -> "ResearchConfig":
+        backend = self.vector_backend.strip().casefold() or "local-hash"
+        if backend not in {"local-hash", "fastembed"}:
+            raise ValueError("research vector backend must be local-hash or fastembed")
+        return ResearchConfig(
+            enabled=bool(self.enabled),
+            auto_build=bool(self.auto_build),
+            vector_backend=backend,
+            vector_dimensions=min(1024, max(64, int(self.vector_dimensions))),
+            candidate_limit=min(20000, max(100, int(self.candidate_limit))),
+            result_limit=min(2000, max(10, int(self.result_limit))),
+            excerpt_chars=min(12000, max(800, int(self.excerpt_chars))),
+            entity_extraction=bool(self.entity_extraction),
+            duplicate_clustering=bool(self.duplicate_clustering),
+            ai_evidence_limit=min(100, max(5, int(self.ai_evidence_limit))),
         )
 
     def to_payload(self) -> dict:
@@ -160,7 +197,7 @@ class NetworkConfig:
     trust_environment: bool = True
     endpoint_mode: str = "auto"
     index_strategy: str = "auto"
-    page_blocks: int = 9
+    page_blocks: int = 0
     cdx_workers: int = 10
     persistent_retries: bool = True
     retry_base_seconds: float = 5.0
@@ -185,7 +222,7 @@ class NetworkConfig:
             trust_environment=bool(self.trust_environment),
             endpoint_mode=endpoint,
             index_strategy=strategy,
-            page_blocks=min(50, max(1, int(self.page_blocks))),
+            page_blocks=min(50, max(0, int(self.page_blocks))),
             cdx_workers=min(12, max(1, int(self.cdx_workers))),
             persistent_retries=bool(self.persistent_retries),
             retry_base_seconds=max(1.0, float(self.retry_base_seconds)),
@@ -219,7 +256,7 @@ class ProjectConfig:
     download_scope: str = "all_text"
     minimum_score: int = 1
     max_file_mb: float = 25.0
-    page_size: int = 50000
+    page_size: int = 100000
     cdx_delay: float = 0.75
     download_delay: float = 0.5
     retries: int = 4
@@ -237,6 +274,7 @@ class ProjectConfig:
     media: MediaConfig | dict = field(default_factory=MediaConfig)
     analysis: AnalysisConfig | dict = field(default_factory=AnalysisConfig)
     ai: AIConfig | dict = field(default_factory=AIConfig)
+    research: ResearchConfig | dict = field(default_factory=ResearchConfig)
     network: NetworkConfig | dict = field(default_factory=NetworkConfig)
     target_settings: dict[str, dict] = field(default_factory=dict)
     auto_backup: bool = True
@@ -296,6 +334,8 @@ class ProjectConfig:
         analysis = analysis.normalized()
         ai = self.ai if isinstance(self.ai, AIConfig) else AIConfig(**self.ai)
         ai = ai.normalized()
+        research = self.research if isinstance(self.research, ResearchConfig) else ResearchConfig(**self.research)
+        research = research.normalized()
         network = self.network if isinstance(self.network, NetworkConfig) else NetworkConfig(**self.network)
         network = network.normalized()
         target_settings: dict[str, dict] = {}
@@ -324,7 +364,7 @@ class ProjectConfig:
             download_scope=self.download_scope if self.download_scope in {"all_text", "keyword_urls", "index_only"} else "all_text",
             minimum_score=max(1, int(self.minimum_score)),
             max_file_mb=max(0.1, float(self.max_file_mb)),
-            page_size=min(50000, max(100, int(self.page_size))),
+            page_size=min(150000, max(100, int(self.page_size))),
             cdx_delay=max(0.0, float(self.cdx_delay)),
             download_delay=max(0.0, float(self.download_delay)),
             retries=min(12, max(1, int(self.retries))),
@@ -342,6 +382,7 @@ class ProjectConfig:
             media=media,
             analysis=analysis,
             ai=ai,
+            research=research,
             network=network,
             target_settings=target_settings,
             auto_backup=bool(self.auto_backup),
@@ -374,6 +415,7 @@ class ProjectConfig:
         payload["media"] = config.media.to_payload() if isinstance(config.media, MediaConfig) else dict(config.media)
         payload["analysis"] = config.analysis.to_payload() if isinstance(config.analysis, AnalysisConfig) else dict(config.analysis)
         payload["ai"] = config.ai.to_payload() if isinstance(config.ai, AIConfig) else dict(config.ai)
+        payload["research"] = config.research.to_payload() if isinstance(config.research, ResearchConfig) else dict(config.research)
         payload["network"] = config.network.to_payload() if isinstance(config.network, NetworkConfig) else dict(config.network)
         payload["version"] = VERSION
         return payload
@@ -392,10 +434,11 @@ def load_project_config(path: Path) -> ProjectConfig:
     media_payload = payload.get("media") or {}
     analysis_payload = payload.get("analysis") or {}
     ai_payload = payload.get("ai") or {}
+    research_payload = payload.get("research") or {}
     network_payload = payload.get("network") or {}
-    loaded_page_size = int(payload.get("page_size", 50000))
+    loaded_page_size = int(payload.get("page_size", 100000))
     loaded_cdx_delay = float(payload.get("cdx_delay", 0.75))
-    loaded_page_blocks = int(network_payload.get("page_blocks", 9))
+    loaded_page_blocks = int(network_payload.get("page_blocks", 0))
     loaded_cdx_workers = int(network_payload.get("cdx_workers", 10))
 
     # Preserve compatibility with early prerelease projects without exposing old
@@ -415,8 +458,28 @@ def load_project_config(path: Path) -> ProjectConfig:
     )
     if untouched_legacy_defaults:
         loaded_page_size = 50000
-        loaded_page_blocks = 9
+        loaded_page_blocks = 0
         loaded_cdx_workers = 10
+    if (
+        loaded_page_size == 50000
+        and loaded_cdx_delay == 0.75
+        and loaded_page_blocks == 9
+        and loaded_cdx_workers == 10
+        and "page_blocks" in network_payload
+    ):
+        loaded_page_blocks = 0
+    # v1.0.2 used 50,000-row resume pages and automatic numbered paging.
+    # When that complete untouched transport profile is encountered, upgrade it
+    # to the final fast defaults. Deliberately customized network profiles keep
+    # their saved values.
+    if (
+        loaded_page_size == 50000
+        and loaded_cdx_delay == 0.75
+        and loaded_page_blocks == 0
+        and loaded_cdx_workers == 10
+        and str(network_payload.get("index_strategy", "auto")).casefold() == "auto"
+    ):
+        loaded_page_size = 100000
     return ProjectConfig(
         output_dir=Path(payload.get("output_dir") or path.parent),
         targets=list(payload.get("targets") or []),
@@ -484,6 +547,19 @@ def load_project_config(path: Path) -> ProjectConfig:
             minimum_relevance=int(ai_payload.get("minimum_relevance", 50)),
             excerpt_chars=int(ai_payload.get("excerpt_chars", 5000)),
             request_timeout=float(ai_payload.get("request_timeout", 120.0)),
+            max_output_tokens=int(ai_payload.get("max_output_tokens", 1600)),
+        ),
+        research=ResearchConfig(
+            enabled=bool(research_payload.get("enabled", True)),
+            auto_build=bool(research_payload.get("auto_build", True)),
+            vector_backend=str(research_payload.get("vector_backend", "local-hash")),
+            vector_dimensions=int(research_payload.get("vector_dimensions", 256)),
+            candidate_limit=int(research_payload.get("candidate_limit", 3000)),
+            result_limit=int(research_payload.get("result_limit", 200)),
+            excerpt_chars=int(research_payload.get("excerpt_chars", 3600)),
+            entity_extraction=bool(research_payload.get("entity_extraction", True)),
+            duplicate_clustering=bool(research_payload.get("duplicate_clustering", True)),
+            ai_evidence_limit=int(research_payload.get("ai_evidence_limit", 24)),
         ),
         network=NetworkConfig(
             backend=str(network_payload.get("backend", "auto")),

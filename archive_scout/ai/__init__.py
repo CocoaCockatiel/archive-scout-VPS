@@ -1,3 +1,3 @@
-from .relevance import AIReviewError, run_ai_review
+from .service import AIService, AIServiceError
 
-__all__ = ["AIReviewError", "run_ai_review"]
+__all__ = ["AIService", "AIServiceError"]

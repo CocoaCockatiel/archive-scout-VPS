@@ -17,6 +17,7 @@ from ..cdx.indexer import (
     PendingWindow,
     PagedBatch,
     _select_page_batch,
+    cdx_response_budget,
     decode_plan,
     encode_plan,
     index_windows,
@@ -42,11 +43,9 @@ from ..database.repositories import (
     mark_media_discovery_document,
     mark_media_discovery_lookup,
     media_discovery_counts,
-    media_discovery_needs_scan,
     queue_media_discovery_candidates,
     record_error,
     record_site_issue,
-    upsert_media_capture,
     upsert_media_captures,
 )
 from ..downloads.rate_limit import SharedFixedRateLimiter, shared_host_gate
@@ -82,7 +81,7 @@ def media_query_signature(config: ProjectConfig, page_size: int | None = None) -
 
 
 def media_query_signatures(config: ProjectConfig) -> tuple[str, ...]:
-    sizes = [config.page_size, 5000, 25000, 1000, 10000, 50000]
+    sizes = [config.page_size, 5000, 25000, 1000, 10000, 50000, 100000, 150000]
     return tuple(dict.fromkeys(media_query_signature(config, size) for size in sizes))
 
 
@@ -94,7 +93,7 @@ def media_index_state_signature(config: ProjectConfig, *, page_size: int | None 
 
 def media_signature_candidates(config: ProjectConfig) -> tuple[tuple[str, str], ...]:
     values: list[tuple[str, str]] = []
-    for size in [config.page_size, 5000, 25000, 1000, 10000, 50000]:
+    for size in [config.page_size, 5000, 25000, 1000, 10000, 50000, 100000, 150000]:
         media_signature = media_query_signature(config, size)
         for revision in (3, 2):
             item = (media_signature, media_index_state_signature(config, page_size=size, revision=revision))
@@ -133,7 +132,7 @@ def build_media_params(
         ("from", start),
         ("to", end),
         ("output", "json"),
-        ("fl", "timestamp,original,mimetype,statuscode,digest,length"),
+        ("fl", "urlkey,timestamp,original,mimetype,statuscode,digest,length"),
     ]
     if exact:
         params.append(("matchType", "exact"))
@@ -162,7 +161,9 @@ def build_media_num_pages_params(
 ):
     params = build_media_params(config, pattern, start, end, extensions=extensions)
     params = [(key, value) for key, value in params if key not in {"limit", "showResumeKey", "resumeKey"}]
-    params.extend([("showNumPages", "true"), ("pageSize", str(max(1, page_blocks)))])
+    params.append(("showNumPages", "true"))
+    if int(page_blocks) > 0:
+        params.append(("pageSize", str(int(page_blocks))))
     return params
 
 
@@ -177,7 +178,9 @@ def build_media_paged_params(
 ):
     params = build_media_params(config, pattern, start, end, extensions=extensions)
     params = [(key, value) for key, value in params if key not in {"limit", "showResumeKey", "resumeKey"}]
-    params.extend([("page", str(max(0, page))), ("pageSize", str(max(1, page_blocks)))])
+    params.append(("page", str(max(0, page))))
+    if int(page_blocks) > 0:
+        params.append(("pageSize", str(int(page_blocks))))
     return params
 
 
@@ -380,9 +383,14 @@ def _defer_media_window(
     callback: Callable[[ProgressEvent], None] | None,
 ) -> int:
     current.failures += 1
-    current.page_size = max(25, (current.page_size or config.page_size) // 2)
-    if current.strategy != "paged":
-        current.page_blocks = max(1, current.page_blocks // 2)
+    if current.strategy == "paged":
+        # Keep server-selected paging (page_blocks=0) server-selected. Turning
+        # an automatic page into pageSize=1 recreates the thousands-of-pages
+        # failure mode this release is intended to eliminate.
+        if current.page_blocks > 1:
+            current.page_blocks = max(1, current.page_blocks // 2)
+    else:
+        current.page_size = max(25, (current.page_size or config.page_size) // 2)
     with database:
         error_id = record_error(
             database,
@@ -421,8 +429,22 @@ def _defer_media_window(
 
 
 def _resolve_media_strategy(current: PendingWindow, config: ProjectConfig, target: str) -> None:
+    desired = preferred_index_strategy(config, target)
     if current.strategy not in {"paged", "resume"}:
-        current.strategy = preferred_index_strategy(config, target)
+        current.strategy = desired
+    elif desired == "resume" and current.strategy == "paged":
+        # Convert unfinished numbered media queues from v1.0.2 to row-scaled
+        # resume traversal. Existing captures stay in SQLite and unchanged rows
+        # are no-op upserts, so no indexed work is lost.
+        current.strategy = "resume"
+        # Keep adaptive date-window splitting available after abandoning only
+        # the old numbered-page queue.
+        current.pagination_supported = True
+        current.page = 0
+        current.page_count = -1
+        current.retry_pages.clear()
+        current.page_failures.clear()
+        current.resume_key = None
     if not current.pagination_supported and current.strategy == "paged":
         current.strategy = "resume"
     if current.page_blocks <= 0:
@@ -467,7 +489,7 @@ def _request_media_paged_batch(
         ),
         stop_event,
         workers=page_workers,
-        max_bytes=max(64 * 1024 * 1024, current.page_blocks * 12 * 1024 * 1024),
+        max_bytes=(192 * 1024 * 1024 if current.page_blocks <= 0 else max(64 * 1024 * 1024, current.page_blocks * 12 * 1024 * 1024)),
     ):
         if result.succeeded and consume_success is not None:
             consume_success(result)
@@ -505,6 +527,7 @@ def _request_media_resume(
             page_size=page_size,
             extensions=extensions,
         ),
+        max_bytes=cdx_response_budget(page_size),
         prefer_text=True,
     )
     rows, next_resume = result.rows, result.resume_key
@@ -910,17 +933,18 @@ def index_direct_media(
                         if callback:
                             callback(ProgressEvent("media_index", f"Combined media CDX timed out for {target} {label}; split into {len(parts)} smaller windows.", completed, total))
                         continue
-                    current.strategy = "paged"
-                    current.page = 0
-                    current.page_count = -1
-                    current.resume_key = None
-                    current.retry_pages.clear()
-                    current.page_failures.clear()
-                    with database:
-                        _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
-                    if callback:
-                        callback(ProgressEvent("media_index", f"Switching the combined media window to paged CDX indexing for {target} {label}.", completed, total))
-                    continue
+                    if preferred_index_strategy(target_config, target) == "paged":
+                        current.strategy = "paged"
+                        current.page = 0
+                        current.page_count = -1
+                        current.resume_key = None
+                        current.retry_pages.clear()
+                        current.page_failures.clear()
+                        with database:
+                            _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
+                        if callback:
+                            callback(ProgressEvent("media_index", f"Switching the combined media window to paged CDX indexing for {target} {label}.", completed, total))
+                        continue
                 error_id = _defer_media_window(
                     target_config, database, plan, current, target_id, year, state_signature,
                     seen, error_id, target, label, exc, completed, total, stop_event, callback,
@@ -1033,10 +1057,15 @@ def _discover_embedded_queue(
     scanned = queued = 0
     cursor = database.execute(
         """
-        SELECT d.id,d.path,d.links_json,d.content_hash,c.original_url
-        FROM documents d JOIN captures c ON c.id=d.capture_id
+        SELECT d.id,d.path,d.links_json,d.content_hash,c.original_url,
+               mdd.content_hash AS discovery_content_hash
+        FROM documents d
+        JOIN captures c ON c.id=d.capture_id
+        LEFT JOIN media_discovery_documents mdd
+          ON mdd.document_id=d.id AND mdd.query_signature=?
         ORDER BY d.id
-        """
+        """,
+        (signature,),
     )
     workers = min(8, max(1, int(config.workers)))
     batch_size = max(64, workers * 16)
@@ -1051,7 +1080,7 @@ def _discover_embedded_queue(
                     raise Stopped
                 document_id = int(row["id"])
                 content_hash = str(row["content_hash"] or "")
-                if not media_discovery_needs_scan(database, signature, document_id, content_hash):
+                if str(row["discovery_content_hash"] or "") == content_hash and content_hash:
                     scanned += 1
                     continue
                 futures.append(pool.submit(
@@ -1063,23 +1092,28 @@ def _discover_embedded_queue(
                     external_only,
                     dict(row),
                 ))
+            completed_results: list[tuple[int, str, list[tuple[str, int | None, str, str]]]] = []
             for future in concurrent.futures.as_completed(futures):
                 if stop_event.is_set():
                     for pending in futures:
                         pending.cancel()
                     raise Stopped
-                document_id, content_hash, discovered = future.result()
+                completed_results.append(future.result())
+            # One transaction per local discovery batch instead of one fsync/
+            # transaction boundary per document. Worker threads never touch SQLite.
+            if completed_results:
                 with database:
-                    queued += queue_media_discovery_candidates(database, signature, discovered)
-                    mark_media_discovery_document(database, signature, document_id, content_hash, len(discovered))
-                scanned += 1
-                if callback and (scanned == total or scanned % 100 == 0):
-                    callback(ProgressEvent(
-                        "media_embed",
-                        f"Discovering embedded media in saved pages {scanned:,}/{total:,}; {queued:,} new URLs queued",
-                        scanned,
-                        total,
-                    ))
+                    for document_id, content_hash, discovered in completed_results:
+                        queued += queue_media_discovery_candidates(database, signature, discovered)
+                        mark_media_discovery_document(database, signature, document_id, content_hash, len(discovered))
+                        scanned += 1
+            if callback and (scanned == total or scanned % 100 == 0):
+                callback(ProgressEvent(
+                    "media_embed",
+                    f"Discovering embedded media in saved pages {scanned:,}/{total:,}; {queued:,} new URLs queued",
+                    scanned,
+                    total,
+                ))
     return queued
 
 
@@ -1087,15 +1121,53 @@ def _embedded_lookup(
     config: ProjectConfig,
     client: HttpClient,
     row: sqlite3.Row,
+    snapshot_strategy: str,
+    endpoints: tuple[str, ...],
 ) -> tuple[sqlite3.Row, list[CDXRow], BaseException | None]:
+    """Resolve one exact embedded URL using the cheapest valid CDX query.
+
+    The default earliest/latest policies need only one capture. Earlier builds
+    fetched as many as 50k/100k captures for every embedded URL and then selected
+    one locally, which made media discovery unnecessarily expensive.
+    """
     try:
-        result = request_cdx_rows(
-            client,
-            cdx_endpoints(config),
-            build_media_params(config, str(row["original_url"]), config.from_date, config.to_date, exact=True),
-            prefer_text=True,
-        )
-        return row, result.rows, None
+        url = str(row["original_url"])
+        strategy = snapshot_strategy
+        if strategy == "earliest":
+            params = build_media_params(config, url, config.from_date, config.to_date, exact=True, page_size=1)
+            params = [(key, value) for key, value in params if key != "showResumeKey"]
+            result = request_cdx_rows(
+                client, endpoints, params, max_bytes=8 * 1024 * 1024, prefer_text=True
+            )
+            return row, result.rows[:1], None
+        if strategy == "latest":
+            params = build_media_params(config, url, config.from_date, config.to_date, exact=True, page_size=1)
+            params = [(key, value) for key, value in params if key not in {"limit", "showResumeKey", "resumeKey", "fastLatest"}]
+            params.extend([("limit", "-1"), ("fastLatest", "true")])
+            result = request_cdx_rows(
+                client, endpoints, params, max_bytes=8 * 1024 * 1024, prefer_text=True
+            )
+            return row, result.rows[-1:] if result.rows else [], None
+
+        rows: list[CDXRow] = []
+        resume: str | None = None
+        while True:
+            result = request_cdx_rows(
+                client,
+                endpoints,
+                build_media_params(
+                    config, url, config.from_date, config.to_date, resume, exact=True, page_size=config.page_size
+                ),
+                max_bytes=cdx_response_budget(config.page_size),
+                prefer_text=True,
+            )
+            rows.extend(result.rows)
+            if not result.resume_key:
+                break
+            if result.resume_key == resume:
+                raise TransientRequestError("CDX returned the same embedded-media resume key twice", splittable=True)
+            resume = result.resume_key
+        return row, rows, None
     except BaseException as exc:
         return row, [], exc
 
@@ -1153,6 +1225,7 @@ def index_embedded_media(
 
     workers = min(max(1, config.network.normalized().cdx_workers), 10)
     max_inflight = max(workers, workers * 2)
+    endpoints = cdx_endpoints(config)
     row_iter = iter_media_discovery_rows(database, signature, config.max_attempts)
     completed = indexed = unavailable = errors = 0
     blocked_hosts = blocked_site_hosts(database)
@@ -1188,7 +1261,7 @@ def index_embedded_media(
                             {"indexed": indexed, "unavailable": unavailable, "errors": errors},
                         ))
                     continue
-                future = pool.submit(_embedded_lookup, config, client, queue_row)
+                future = pool.submit(_embedded_lookup, config, client, queue_row, media.snapshot_strategy, endpoints)
                 futures[future] = queue_row
 
         submit_available()
@@ -1215,15 +1288,18 @@ def index_embedded_media(
                         chosen = [max(rows, key=lambda value: value[0])]
                     else:
                         chosen = rows
+                    accepted_items: list[tuple[dict[str, str], str, str]] = []
+                    for compact in chosen:
+                        value = cdx_row_to_dict(compact)
+                        allowed, kind, extension = _embedded_row_kind(value, hint, media)
+                        if allowed and kind:
+                            accepted_items.append((value, kind, extension))
+                    accepted_count = len(accepted_items)
                     with database:
-                        for compact in chosen:
-                            value = cdx_row_to_dict(compact)
-                            allowed, kind, extension = _embedded_row_kind(value, hint, media)
-                            if allowed and kind:
-                                upsert_media_capture(
-                                    database, value, None, signature, kind, extension, document_id, source_type
-                                )
-                                accepted_count += 1
+                        if accepted_items:
+                            upsert_media_captures(
+                                database, accepted_items, None, signature, document_id, source_type
+                            )
                         mark_media_discovery_lookup(
                             database,
                             int(queue_row["id"]),

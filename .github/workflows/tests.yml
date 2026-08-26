@@ -58,7 +58,7 @@ jobs:
       - name: Verify imports and package metadata
         run: >-
           python -c "import importlib.metadata, archive_scout, archive_scout.app, archive_scout.cli;
-          assert importlib.metadata.version('archive-scout') == '1.0.1';
+          assert importlib.metadata.version('archive-scout') == '1.0.3';
           print('Archive Scout import and metadata checks passed')"
 
       - name: Run tests

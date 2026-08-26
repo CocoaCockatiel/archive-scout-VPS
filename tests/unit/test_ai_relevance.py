@@ -187,7 +187,7 @@ class AIRelevanceTests(unittest.TestCase):
             ai=AIConfig(candidate_limit=50, batch_size=4, minimum_relevance=50),
         )
         before_score = database.execute("SELECT score FROM document_matches WHERE id=?", (match_id,)).fetchone()[0]
-        with patch("archive_scout.ai.relevance.OpenAIRelevanceClient", _FakeClient):
+        with patch("archive_scout.ai.relevance.ProviderRelevanceClient", _FakeClient):
             run_id = run_ai_review(
                 config,
                 database,

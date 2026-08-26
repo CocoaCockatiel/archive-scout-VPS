@@ -86,17 +86,14 @@ def month_windows(config: ProjectConfig, year: int) -> list[tuple[str, str]]:
 
 
 def index_windows(config: ProjectConfig, target: str, year: int) -> list[tuple[str, str]]:
-    """Use one yearly window for paged indexing and months for resume indexing.
+    """Start each target/year as one large resumable window.
 
-    Page-number retrieval already partitions the CDX index. Repeating a page-count
-    request for every month adds substantial overhead, so broad queries use one
-    resumable yearly page queue. Narrow resume-key queries retain monthly windows
-    because those windows are useful timeout boundaries.
+    The timeout recovery engine already subdivides only the ranges that actually
+    fail. Starting with twelve unconditional monthly windows multiplied request
+    overhead on healthy archives, especially when resume-key batches are large.
     """
-    if preferred_index_strategy(config, target) == "paged":
-        window = cdx_year_window(config, year)
-        return [window] if window else []
-    return month_windows(config, year)
+    window = cdx_year_window(config, year)
+    return [window] if window else []
 
 
 def encode_resume(start: str, end: str, resume: str | None) -> str:
@@ -250,7 +247,7 @@ def split_window(window: PendingWindow) -> list[PendingWindow]:
                 end=part_end.strftime("%Y%m%d%H%M%S"),
                 page_size=max(100, window.page_size // 2) if window.page_size else 0,
                 strategy=window.strategy,
-                page_blocks=max(1, window.page_blocks),
+                page_blocks=max(0, window.page_blocks),
                 pagination_supported=window.pagination_supported,
             )
         )
@@ -507,12 +504,34 @@ def _client_for_config(
 
 
 def _resolve_strategy(current: PendingWindow, config: ProjectConfig, target: str) -> None:
+    desired = preferred_index_strategy(config, target)
     if current.strategy not in {"resume", "paged"}:
-        current.strategy = preferred_index_strategy(config, target)
+        current.strategy = desired
+    elif desired == "resume" and current.strategy == "paged":
+        # Safely abandon an unfinished v1.0.2 numbered-page queue. Previously
+        # indexed rows remain in SQLite and no-op upserts make replaying the
+        # beginning of this date window cheap; continuing thousands of page
+        # numbers can be orders of magnitude slower.
+        current.strategy = "resume"
+        # Resume-key traversal still supports adaptive date-window splitting on
+        # transient oversized/timeout responses; only the old numbered queue is
+        # being discarded here.
+        current.pagination_supported = True
+        current.page = 0
+        current.page_count = -1
+        current.retry_pages.clear()
+        current.page_failures.clear()
+        current.resume_key = None
     if not current.pagination_supported and current.strategy == "paged":
         current.strategy = "resume"
     if current.page_blocks <= 0:
         current.page_blocks = config.network.normalized().page_blocks
+
+
+def cdx_response_budget(page_size: int) -> int:
+    """Bound a large CDX response without penalizing normal 100k batches."""
+    size = max(100, int(page_size))
+    return min(256 * 1024 * 1024, max(64 * 1024 * 1024, size * 1536))
 
 
 def _select_page_batch(current: PendingWindow, workers: int) -> tuple[list[int], int]:
@@ -571,7 +590,10 @@ def _request_paged_batch(
         lambda page: build_paged_cdx_params(config, target, current.start, current.end, page, current.page_blocks),
         stop_event,
         workers=page_workers,
-        max_bytes=max(64 * 1024 * 1024, current.page_blocks * 12 * 1024 * 1024),
+        # Server-sized pages can contain far more ZipNum blocks than the old
+        # pageSize=9 transport. Keep a generous per-response safety ceiling while
+        # concurrency is independently capped by effective_page_workers().
+        max_bytes=(192 * 1024 * 1024 if current.page_blocks <= 0 else max(64 * 1024 * 1024, current.page_blocks * 12 * 1024 * 1024)),
     ):
         if result.succeeded and consume_success is not None:
             consume_success(result)
@@ -601,7 +623,7 @@ def _request_resume(
         client,
         cdx_endpoints(config),
         build_cdx_params(config, target, current.start, current.end, current.resume_key, page_size=page_size),
-        max_bytes=max(64 * 1024 * 1024, page_size * 2048),
+        max_bytes=cdx_response_budget(page_size),
         prefer_text=True,
     )
     rows, next_resume = result.rows, result.resume_key

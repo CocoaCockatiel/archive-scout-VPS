@@ -23,20 +23,19 @@ class PageFetchResult:
 
 
 def effective_page_workers(requested_workers: int, page_blocks: int) -> int:
-    """Keep enough requests in flight without multiplying huge page buffers.
+    """Bound concurrent page bodies while favoring fewer, server-sized pages.
 
-    A CDX pageSize block is roughly a few thousand records. Archive Scout can
-    still use ten workers for small pages, but large nine-block pages are capped
-    at four simultaneous parsed results. The shared rate limiter is unchanged;
-    this cap protects memory without reducing request-start speed for the slow,
-    large responses that need concurrency most.
+    ``page_blocks == 0`` in the explicit paged compatibility strategy means
+    pageSize is omitted and Internet Archive chooses its normal page grouping.
+    Those bodies can be much larger than old fixed-block pages, so three
+    concurrent requests are enough to hide latency without multiplying memory
+    use. Explicit smaller page sizes may still use more workers.
     """
     requested = max(1, int(requested_workers))
-    blocks = max(1, int(page_blocks))
-    # Four nine-block pages are enough to keep the fixed 0.75-second
-    # request-start limiter saturated for responses taking up to three seconds,
-    # while avoiding six simultaneous ~54k-row buffers on lower-memory systems.
-    memory_cap = max(2, 36 // blocks)
+    blocks = int(page_blocks)
+    if blocks <= 0:
+        return min(requested, 3)
+    memory_cap = max(2, 48 // max(1, blocks))
     return min(requested, memory_cap)
 
 

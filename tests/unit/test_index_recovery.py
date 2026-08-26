@@ -16,7 +16,7 @@ from archive_scout.operations import run_project
 
 
 class IndexRecoveryTests(unittest.TestCase):
-    def test_full_year_is_partitioned_into_months(self):
+    def test_full_year_starts_as_one_resumable_window(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = ProjectConfig(
@@ -31,7 +31,7 @@ class IndexRecoveryTests(unittest.TestCase):
             database = open_database(root)
             with patch("archive_scout.cdx.client.HttpClient.get_cdx_any", return_value=[]) as mocked:
                 index_archive(config, database, threading.Event())
-            self.assertEqual(mocked.call_count, 12)
+            self.assertEqual(mocked.call_count, 1)
             state = database.execute("SELECT complete,seen,resume_key FROM index_state").fetchone()
             self.assertEqual(state["complete"], 1)
             self.assertEqual(state["seen"], 0)

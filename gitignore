@@ -16,3 +16,8 @@ venv/
 *.egg-info/
 .coverage
 htmlcov/
+
+# Local credentials and developer environment
+.env
+.env.*
+!.env.example

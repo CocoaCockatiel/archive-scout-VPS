@@ -75,15 +75,20 @@ class LiteralAutomaton:
                 return True
         return False
 
-    def find(self, text: str) -> set[str]:
-        matches: set[str] = set()
+    def find_into(self, text: str, matches: set[str]) -> None:
+        """Add matches to an existing set without allocating one set per field."""
         if not text or not self.patterns:
-            return matches
+            return
         state = 0
         nodes = self._nodes
         for character in text:
             while state and character not in nodes[state].transitions:
                 state = nodes[state].failure
             state = nodes[state].transitions.get(character, 0)
-            matches.update(nodes[state].outputs)
+            if nodes[state].outputs:
+                matches.update(nodes[state].outputs)
+
+    def find(self, text: str) -> set[str]:
+        matches: set[str] = set()
+        self.find_into(text, matches)
         return matches

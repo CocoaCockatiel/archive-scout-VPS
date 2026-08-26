@@ -6,6 +6,7 @@ import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
 
+from ..scanning.automaton import LiteralAutomaton
 from ..utils import clean_space, utc_now
 
 
@@ -17,8 +18,8 @@ class DiffSummary:
 
 
 def _summary(earlier: str, later: str) -> dict:
-    earlier_lines = [clean_space(line) for line in earlier.splitlines() if clean_space(line)]
-    later_lines = [clean_space(line) for line in later.splitlines() if clean_space(line)]
+    earlier_lines = [value for line in earlier.splitlines() if (value := clean_space(line))]
+    later_lines = [value for line in later.splitlines() if (value := clean_space(line))]
     matcher = difflib.SequenceMatcher(None, earlier, later, autojunk=False)
     earlier_set = set(earlier_lines)
     later_set = set(later_lines)
@@ -42,14 +43,24 @@ def compare_snapshots(database: sqlite3.Connection) -> DiffSummary:
         database.execute("DELETE FROM snapshot_diffs")
         for row in database.execute(
             """
-            SELECT c.id AS capture_id,c.original_url,c.timestamp,d.body_text
+            SELECT c.id AS capture_id,c.original_url,c.timestamp,d.body_text,d.normalized_hash
             FROM captures c JOIN documents d ON d.id=c.document_id
             WHERE c.state='downloaded'
             ORDER BY c.original_url,c.timestamp,c.id
             """
         ):
             if previous is not None and previous["original_url"] == row["original_url"]:
-                result = _summary(str(previous["body_text"] or ""), str(row["body_text"] or ""))
+                previous_hash = str(previous["normalized_hash"] or "")
+                current_hash = str(row["normalized_hash"] or "")
+                if previous_hash and previous_hash == current_hash:
+                    result = {
+                        "similarity": 1.0,
+                        "earlier_chars": len(str(previous["body_text"] or "")),
+                        "later_chars": len(str(row["body_text"] or "")),
+                        "added_lines": [], "removed_lines": [], "added_count": 0, "removed_count": 0,
+                    }
+                else:
+                    result = _summary(str(previous["body_text"] or ""), str(row["body_text"] or ""))
                 database.execute(
                     """
                     INSERT INTO snapshot_diffs(earlier_capture_id,later_capture_id,summary_json,created_at)
@@ -70,7 +81,10 @@ def build_first_appearances(database: sqlite3.Connection, queries: list[str]) ->
     queries = list(dict.fromkeys(value.strip() for value in queries if value.strip()))
     if not queries:
         return 0
-    needles = [(query, query.casefold()) for query in queries]
+    needle_queries: dict[str, list[str]] = {}
+    for query in queries:
+        needle_queries.setdefault(query.casefold(), []).append(query)
+    automaton = LiteralAutomaton(needle_queries)
     count = 0
 
     def flush(original_url: str | None, matches: dict[str, tuple[sqlite3.Row, sqlite3.Row]]) -> int:
@@ -116,11 +130,10 @@ def build_first_appearances(database: sqlite3.Connection, queries: list[str]) ->
             haystack = " ".join(
                 (str(row["title"] or ""), str(row["body_text"] or ""), str(row["links_json"] or ""))
             ).casefold()
-            for query, needle in needles:
-                if needle not in haystack:
-                    continue
-                first, _last = matches.get(query, (row, row))
-                matches[query] = (first, row)
+            for needle in automaton.find(haystack):
+                for query in needle_queries.get(needle, ()):
+                    first, _last = matches.get(query, (row, row))
+                    matches[query] = (first, row)
         count += flush(current_url, matches)
     return count
 

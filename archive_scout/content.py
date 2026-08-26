@@ -12,6 +12,7 @@ from .utils import clean_space
 URL_PATTERN = re.compile(r'''(?ix)\b(?:https?://|ftp://|www\.)[^\s<>"'()\[\]{}]+''')
 TITLE_PATTERN = re.compile(r"(?is)<title[^>]*>(.*?)</title>")
 TAG_PATTERN = re.compile(r"(?is)<[^>]+>")
+CHARSET_PATTERN = re.compile(r"charset\s*=\s*['\"]?([A-Za-z0-9._-]+)", re.IGNORECASE)
 REPLAY_ERROR_MARKERS = (
     ("this url has been excluded from the wayback machine", "wayback_excluded"),
     ("blocked site error", "wayback_excluded"),
@@ -40,7 +41,8 @@ class PageParser(HTMLParser):
                 self.links.append(value.strip())
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() in {"script", "style", "noscript", "svg"} and self.ignore_depth:
+        lowered = tag.lower()
+        if lowered in {"script", "style", "noscript", "svg"} and self.ignore_depth:
             self.ignore_depth -= 1
 
     def handle_data(self, data: str) -> None:
@@ -76,11 +78,11 @@ def title_from_html(raw: str) -> str:
 
 def decode_bytes(data: bytes, content_type: str = "") -> str:
     candidates: list[str] = []
-    charset_match = re.search(r"charset\s*=\s*['\"]?([A-Za-z0-9._-]+)", content_type, re.IGNORECASE)
+    charset_match = CHARSET_PATTERN.search(content_type)
     if charset_match:
         candidates.append(charset_match.group(1))
     head = data[:4096].decode("ascii", "ignore")
-    meta_match = re.search(r"charset\s*=\s*['\"]?([A-Za-z0-9._-]+)", head, re.IGNORECASE)
+    meta_match = CHARSET_PATTERN.search(head)
     if meta_match:
         candidates.append(meta_match.group(1))
     candidates.extend(["utf-8", "windows-1252", "latin-1"])
@@ -109,7 +111,12 @@ def looks_textual_bytes(data: bytes, content_type: str = "") -> bool:
 
 def is_text_candidate(url: str, mimetype: str = "") -> bool:
     parsed = safe_urlsplit(url)
-    extension = Path(parsed.path).suffix.lower() if parsed else ""
+    if parsed:
+        filename = parsed.path.rsplit("/", 1)[-1]
+        dot = filename.rfind(".")
+        extension = filename[dot:].lower() if dot > 0 else ""
+    else:
+        extension = ""
     mime = (mimetype or "").split(";", 1)[0].lower()
     if extension in TEXT_EXTENSIONS:
         return True

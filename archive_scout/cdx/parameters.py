@@ -29,7 +29,7 @@ def cdx_query_signatures(config: ProjectConfig) -> tuple[str, ...]:
     adopt completed work created with the earlier defaults instead of forcing
     an expensive re-index.
     """
-    sizes = [config.page_size, 5000, 25000, 1000, 10000, 50000]
+    sizes = [config.page_size, 5000, 25000, 1000, 10000, 50000, 100000, 150000]
     return tuple(dict.fromkeys(cdx_query_signature(config, size) for size in sizes))
 
 
@@ -62,7 +62,7 @@ def build_cdx_params(
         ("from", start),
         ("to", end),
         ("output", "json"),
-        ("fl", "timestamp,original,mimetype,statuscode,digest,length"),
+        ("fl", "urlkey,timestamp,original,mimetype,statuscode,digest,length"),
     ]
     if config.cdx_match_type:
         params.append(("matchType", config.cdx_match_type))
@@ -125,7 +125,11 @@ def preferred_index_strategy(config: ProjectConfig, target: str) -> str:
     strategy = config.network.normalized().index_strategy
     if strategy != "auto":
         return strategy
-    return "paged" if is_broad_cdx_query(config, target) else "resume"
+    # Resume-key traversal scales by returned rows instead of by the archive's
+    # internal ZipNum page topology. A giant domain can expose thousands of
+    # numbered pages even when pageSize is large, so numbered paging is now an
+    # explicit compatibility/diagnostic strategy rather than the automatic one.
+    return "resume"
 
 
 def build_num_pages_params(
@@ -138,7 +142,13 @@ def build_num_pages_params(
     params = build_cdx_params(config, target, start, end, page_size=config.page_size)
     params = [(key, value) for key, value in params if key not in {"limit", "showResumeKey", "resumeKey"}]
     params.append(("showNumPages", "true"))
-    params.append(("pageSize", str(page_blocks or config.network.normalized().page_blocks)))
+    blocks = config.network.normalized().page_blocks if page_blocks is None else int(page_blocks)
+    # 0 deliberately means "use Internet Archive's server-selected page size".
+    # The server default groups substantially more ZipNum blocks than the old
+    # hard-coded pageSize=9, which avoids turning broad sites into thousands of
+    # tiny page requests while keeping the official pagination mechanism.
+    if blocks > 0:
+        params.append(("pageSize", str(blocks)))
     return params
 
 
@@ -153,7 +163,9 @@ def build_paged_cdx_params(
     params = build_cdx_params(config, target, start, end, page_size=config.page_size)
     params = [(key, value) for key, value in params if key not in {"limit", "showResumeKey", "resumeKey"}]
     params.append(("page", str(max(0, int(page)))))
-    params.append(("pageSize", str(page_blocks or config.network.normalized().page_blocks)))
+    blocks = config.network.normalized().page_blocks if page_blocks is None else int(page_blocks)
+    if blocks > 0:
+        params.append(("pageSize", str(blocks)))
     return params
 
 

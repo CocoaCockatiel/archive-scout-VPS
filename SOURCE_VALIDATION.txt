@@ -1,48 +1,66 @@
-Archive Scout 1.0.1 source validation
-Date: 2026-08-13
+Archive Scout 1.0.3 source validation
+Date: 2026-08-26
 
-Audit basis
-- P1 interrupted-index resume: fixed. Resume re-enters the saved CDX queue before download work.
-- P1 shared-VPS throttling: fixed in the official process. Concurrent projects now share request-start pacing and one Wayback host gate; HTTP 503 coordinates even without Retry-After.
-- P2 visible counter reset: fixed. Normal resume progress is cumulative from persisted capture states.
-- P2 safe pauses reported as failures by Discord: the Discord fork is not part of the official repository. Archive Scout 1.0.1 now persists operation progress/status and exposes is_recoverable_pause() so wrappers can classify saved pauses without treating them as crashes.
+Release scope
+- Final performance-focused release built on the complete 1.0.2 feature set and interface.
+- Indexing: automatic broad/direct-media CDX traversal is resume-key-first, uses 100,000-row batches by default, preserves explicit paged compatibility mode, and converts unfinished 1.0.2 numbered queues without deleting already indexed captures.
+- Acquisition resilience: large resume windows retain adaptive subdivision, saved queue state, shared Wayback pacing, finite pause budgets, and coordinated 429/503 recovery.
+- Media: faster persistent external-embed discovery, exact-CDX resolution, URL-policy caching, fewer parser passes, batched database work, and the same row-scaled resume strategy as normal indexing.
+- Scanning/analysis: lower-allocation keyword candidate selection, faster proximity scoring, batched analysis persistence, optimized first-appearance search, and no-op reuse of unchanged work.
+- Research Intelligence: bulk metadata/relationship retrieval, SQL-side stale cleanup, incremental graph rebuilds, and fewer project-sized Python allocations.
+- Database/reporting: faster compact CDX ingestion, index-assisted error lookup, additional safe indexes, throttled operation-progress persistence, and cheaper latest-report publication where hardlinks are supported.
+- Existing AI relevance, bot/CLI automation, deterministic scoring, human review, reports, external media, project safety, and schema-v7 compatibility are preserved.
 
 Automated validation
-- 155 automated tests completed successfully.
+- 178 automated tests completed successfully.
 - 1 display-dependent theme test was skipped because no graphical display is available in this environment.
-- 8 dedicated v1.0.1 audit regression tests passed.
-- Python compilation completed for archive_scout, tests, and scripts.
+- All existing database migration tests passed; database schema remains version 7 and no migration is required from 1.0.2.
+- Python compilation completed for archive_scout, tests, scripts, run_app.py, and run_cli.py.
 - .github/workflows/tests.yml parsed successfully as YAML.
 - .github/workflows/build-and-release.yml parsed successfully as YAML.
 - scripts/build_linux.sh passed bash syntax validation.
 - scripts/build_macos.sh passed bash syntax validation.
-- Python wheel packaging completed successfully as archive_scout-1.0.1-py3-none-any.whl using pip --no-build-isolation.
-- Public application/package version is 1.0.1.
-- Database schema remains version 6; no project migration is required from 1.0.0.
+- git diff --check passed.
+- Python wheel packaging completed successfully as archive_scout-1.0.3-py3-none-any.whl using pip --no-build-isolation.
+- Public application/package version is 1.0.3.
+- Database schema version is 7.
 
-Network/recovery validation
-- Headerless HTTP 503 enters the coordinated Wayback host pause and can defer safely after the configured budget.
-- Shared request pacing coordinates independent clients in the same process.
-- Shared host-gate identity is process-wide and adopts conservative pause settings.
-- Legacy zero pause budgets normalize to finite safety defaults: 15 minutes and 8 coordinated incidents.
-- Resume invokes index_archive before download_archive, allowing the exact persisted CDX queue to continue.
-- Recoverable ConnectivityPaused and RateLimitDeferred states are distinguishable through is_recoverable_pause().
+Indexing validation
+- Automatic indexing selects resume-key traversal and does not depend on showNumPages/numbered-page enumeration.
+- Automatic resume requests include urlkey in the CDX field list for reliable continuation and request 100,000 rows by default.
+- Explicit paged strategy remains available for compatibility and diagnostics.
+- An unfinished normal numbered queue with thousands of saved pages converts to resume traversal while retaining its date window and already committed captures.
+- An unfinished direct-media numbered queue converts the same way.
+- Automatic media indexing no longer turns automatic page grouping into pageSize=1.
+- URLs containing spaces remain intact in line-oriented urlkey CDX responses and resume tokens are preserved.
+- Untouched 1.0.2 50,000-row network defaults upgrade to 100,000 rows; deliberately customized values remain customized.
+- Existing timeout subdivision, resume persistence, shared Wayback pacing, finite pause budgets, headerless 503 coordination, site-issue circuits, and interruption recovery remain covered by the full suite.
 
-Progress validation
-- Cumulative progress is derived from persisted capture states plus the remaining disk-backed queue.
-- operation_runs.progress_json is updated from owner-thread progress events for external integrations.
-- Existing 1.0 AI relevance, external embedded-media, scanning, reports, recovery, and analysis tests remain green.
+Performance-path validation
+- Compact CDX tuples and mapping-form CDX rows persist with identical repository semantics.
+- Repeated unchanged CDX rows remain no-op database writes.
+- Keyword scoring retains exact aggregate score semantics in regression coverage while using lower-allocation candidate/proximity paths.
+- External media discovery/retry, streamed media transfer, local rescan reuse, Research Intelligence, and analysis workflows remain covered by integration/unit tests.
 
 Offline 100,000-row performance validation
-- CDX rows parsed: 100,000 in 5.716 seconds.
-- Parse-and-upsert: 11.190 seconds.
+- 100,000 CDX rows parsed in 2.385 seconds.
+- Parse-and-upsert completed in 4.428 seconds.
 - Repeating the same 100,000-row index produced 0 unchanged-row database writes.
-- Parser peak traced memory: 23,847,113 bytes.
+- Parser peak traced memory: 23,847,090 bytes.
 - HTTP attempts: 0.
+- Duplicate work: 0.
 
-Release limitations
-- Native Windows, macOS, and Linux distributable packages were not produced in this Linux validation environment.
-- Real code-signing/notarization transactions were not performed.
-- A live Internet Archive/VPS concurrency stress test was not performed.
-- The separate Discord VPS fork was not included in the 1.0.0 official repository, so its discord_bot.py was not directly modified here.
-- Native GitHub Actions builds and smoke tests should complete successfully before publishing v1.0.1.
+Offline 1,000,000-row parser validation
+- 1,000,000 CDX rows parsed in 24.096 seconds.
+- Parser peak traced memory: 24,047,096 bytes.
+- HTTP attempts: 0.
+- Duplicate work: 0.
+
+Release limitations / remaining gates
+- The offline benchmark is deterministic and does not claim a guaranteed live Internet Archive wall-clock speedup; Wayback server load and target shape remain external variables.
+- A live Internet Archive large-site stress test was not performed in this validation environment.
+- Native Windows, macOS, and Linux distributable binaries were not produced in this container because PyInstaller is not installed here.
+- Build definitions were validated locally; GitHub Actions must produce and smoke-test the actual native GUI and ArchiveScoutCLI packages.
+- Real Windows signing, macOS signing/notarization, and release-upload transactions were not performed.
+- A live external AI-provider request was not performed because validation does not use user credentials.
+- Publish tag v1.0.3 only after the GitHub Actions matrix and native package smoke tests pass on the exact patched release commit.

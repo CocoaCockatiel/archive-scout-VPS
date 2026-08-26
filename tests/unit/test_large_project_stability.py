@@ -62,7 +62,7 @@ class LargeProjectStabilityTests(unittest.TestCase):
             database.close()
 
     def test_large_pages_keep_request_speed_but_cap_resident_buffers(self):
-        self.assertEqual(effective_page_workers(10, 9), 4)
+        self.assertEqual(effective_page_workers(10, 9), 5)
         self.assertEqual(effective_page_workers(10, 1), 10)
 
     def test_empty_successful_text_response_is_a_valid_empty_index(self):

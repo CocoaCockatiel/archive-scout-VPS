@@ -837,6 +837,12 @@ def parse_cdx_text_rows(
     after_blank = False
     resume_candidate: bytes | None = None
     first_nonempty = True
+    fl_value = next((value for key, value in params if key.casefold() == "fl"), "")
+    has_urlkey = fl_value.lstrip().casefold().startswith("urlkey,")
+    field_offset = 1 if has_urlkey else 0
+    expected_parts = 7 if has_urlkey else 6
+    maxsplit = expected_parts - 1
+    header_token = b"urlkey" if has_urlkey else b"timestamp"
     for raw_line in _iter_binary_lines(data):
         line = raw_line.strip()
         if first_nonempty:
@@ -850,30 +856,36 @@ def parse_cdx_text_rows(
             if not malformed_preview:
                 malformed_preview = _decode_field(resume_candidate)[:320]
             resume_candidate = None
-        parts = line.split(None, 5)
+        parts = line.split(None, maxsplit)
         if after_blank and len(parts) == 1:
             resume_candidate = parts[0]
             after_blank = False
             continue
         after_blank = False
-        if len(parts) == 6 and parts[0].lower() == b"timestamp":
-            continue
-        if len(parts) != 6 or not parts[0].isdigit():
+        if len(parts) != expected_parts:
             malformed_count += 1
             if not malformed_preview:
                 malformed_preview = _decode_field(line)[:320]
             continue
-        timestamp, mimetype, statuscode, digest, length, original = parts
-        rows.append(
-            (
-                _decode_field(timestamp),
-                _decode_field(original),
-                _decode_field(mimetype),
-                _decode_field(statuscode),
-                _decode_field(digest),
-                _decode_field(length),
-            )
-        )
+        timestamp = parts[field_offset]
+        if not timestamp.isdigit():
+            # Header rows are rare. Test for them only after the numeric fast
+            # path fails rather than lower-casing the first field of every row.
+            if parts[0].lower() == header_token:
+                continue
+            malformed_count += 1
+            if not malformed_preview:
+                malformed_preview = _decode_field(line)[:320]
+            continue
+        mimetype = parts[field_offset + 1]
+        statuscode = parts[field_offset + 2]
+        digest = parts[field_offset + 3]
+        length = parts[field_offset + 4]
+        original = parts[field_offset + 5]
+        rows.append((
+            _decode_field(timestamp), _decode_field(original), _decode_field(mimetype),
+            _decode_field(statuscode), _decode_field(digest), _decode_field(length),
+        ))
     if malformed_count:
         raise MalformedCDXResponse(
             f"CDX plain-text response contained {malformed_count} malformed row(s) at {endpoint}: "
@@ -897,7 +909,11 @@ def cdx_text_fallback_params(params: list[tuple[str, str]]) -> list[tuple[str, s
     if not any(key.casefold() == "shownumpages" and value.casefold() == "true" for key, value in params):
         # Keeping original last makes split(maxsplit=5) safe even for malformed
         # historical URLs containing literal spaces.
-        cleaned.append(("fl", "timestamp,mimetype,statuscode,digest,length,original"))
+        # urlkey is intentionally retained for robust resumeKey traversal. The
+        # Wayback CDX resume token is based on index ordering, and omitting the
+        # sort key has historically produced incorrect continuation behavior on
+        # some server versions. The parser discards it after continuation is safe.
+        cleaned.append(("fl", "urlkey,timestamp,mimetype,statuscode,digest,length,original"))
     return cleaned
 
 
