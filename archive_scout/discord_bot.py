@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
+import sqlite3
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -49,6 +51,87 @@ def parse_targets(primary: str, additional: str = "") -> list[str]:
     return targets
 
 
+def _compact_discord_text(value: object, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    text = text.replace("@", "@\u200b").replace("`", "'")
+    return text[:limit]
+
+
+def live_matches_text(projects_root: Path, project: str, limit: int = 5) -> str:
+    """Return a bounded, read-only snapshot of matches from an active scan."""
+    project_dir = safe_project_dir(projects_root, project)
+    database_path = project_dir / "archive_scout.sqlite3"
+    if not database_path.is_file():
+        return f"Project `{project}` has no database yet."
+    limit = min(10, max(1, int(limit)))
+    uri = database_path.resolve().as_uri() + "?mode=ro"
+    database = sqlite3.connect(uri, uri=True, timeout=5)
+    database.row_factory = sqlite3.Row
+    try:
+        database.execute("PRAGMA query_only=ON")
+        database.execute("PRAGMA busy_timeout=5000")
+        scan = database.execute(
+            """
+            SELECT id,status,minimum_score
+            FROM scan_runs
+            ORDER BY CASE WHEN status='running' THEN 0 ELSE 1 END,id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if not scan:
+            return f"Project `{project}` has not started scanning yet."
+        total = int(database.execute(
+            """
+            SELECT COUNT(*) FROM document_matches
+            WHERE scan_run_id=? AND score>=? AND excluded=0 AND required_missing=0
+            """,
+            (int(scan["id"]), int(scan["minimum_score"])),
+        ).fetchone()[0])
+        rows = database.execute(
+            """
+            SELECT m.id,m.score,m.hits_json,m.snippets_json,d.title,c.original_url,c.timestamp
+            FROM document_matches m
+            JOIN documents d ON d.id=m.document_id
+            JOIN captures c ON c.id=d.capture_id
+            WHERE m.scan_run_id=? AND m.score>=? AND m.excluded=0 AND m.required_missing=0
+            ORDER BY m.id DESC LIMIT ?
+            """,
+            (int(scan["id"]), int(scan["minimum_score"]), limit),
+        ).fetchall()
+    finally:
+        database.close()
+    if not rows:
+        return (
+            f"Project `{project}` scan `{scan['status']}` has no qualifying matches yet. "
+            "This command is read-only and does not pause the search."
+        )
+    heading = (
+        f"**Live matches for `{project}`** — {total:,} qualifying match"
+        f"{'es' if total != 1 else ''}; scan `{scan['status']}`\n"
+        "Newest matches first:\n"
+    )
+    lines: list[str] = []
+    for row in rows:
+        try:
+            hits = json.loads(row["hits_json"] or "{}")
+        except (TypeError, ValueError):
+            hits = {}
+        hit_text = ", ".join(
+            f"{_compact_discord_text(label, 50)} x{count}" for label, count in list(hits.items())[:5]
+        )
+        title = _compact_discord_text(row["title"], 100)
+        url = _compact_discord_text(row["original_url"], 350).replace("<", "%3C").replace(">", "%3E")
+        timestamp = _compact_discord_text(row["timestamp"], 20)
+        details = [f"score **{int(row['score'])}**", f"capture `{timestamp}`"]
+        if hit_text:
+            details.append(f"terms: `{hit_text}`")
+        entry = f"• {'**' + title + '** — ' if title else ''}{' · '.join(details)}\n  <{url}>"
+        if len(heading) + sum(len(line) + 1 for line in lines) + len(entry) > 1850:
+            break
+        lines.append(entry)
+    return heading + "\n".join(lines)
+
+
 def build_help_text(max_concurrent_jobs: int) -> str:
     return f"""**Archive Scout quick start**
 
@@ -63,6 +146,7 @@ The bot stays online 24/7 and can run up to **{max_concurrent_jobs} separate pro
 - `/scout create` - Create a search. Put extra related sites in `additional_targets`, separated by semicolons.
 - `/scout projects` - List saved projects.
 - `/scout run ... mode:all` - Index, download, scan, and create reports.
+- `/scout matches project:case-one` - View new matches without pausing a running search.
 - `/scout stop project:case-one` - Safely stop one job.
 - `/scout run project:case-one mode:resume` - Continue an interrupted job.
 - `/scout reports project:case-one` - List its reports.
@@ -352,6 +436,30 @@ class ScoutCog(commands.Cog):
             return
         _, message = await self.bot.jobs.stop(project)
         await interaction.response.send_message(message, ephemeral=True)
+
+    @scout.command(name="matches", description="Show matches without pausing a running search")
+    @app_commands.describe(project="Project name", limit="Number of newest matches to show (1-10)")
+    async def matches(self, interaction: discord.Interaction, project: str, limit: int = 5) -> None:
+        if not await self.authorized(interaction):
+            return
+        try:
+            safe_project_dir(self.bot.settings.projects_root, project)
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            text = await asyncio.to_thread(
+                live_matches_text, self.bot.settings.projects_root, project, limit
+            )
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            LOG.warning("Could not read live matches for %s: %s", project, exc)
+            text = f"Could not read live matches: `{type(exc).__name__}: {str(exc)[:500]}`"
+        await interaction.followup.send(
+            text[:1900],
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @scout.command(name="reports", description="List generated report files for a project")
     async def reports(self, interaction: discord.Interaction, project: str) -> None:

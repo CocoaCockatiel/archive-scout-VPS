@@ -67,6 +67,8 @@ docker compose exec -T archive-scout-bot tar -C /data -czf - projects > archive-
 - `/scout projects` lists available projects.
 - `/scout run` starts an operation such as `all`, `resume`, `report`, or `integrity`.
 - `/scout status` shows all active jobs, or one named project's latest progress.
+- `/scout matches` shows the newest qualifying matches from a project's current scan without
+  pausing or modifying the running job. Set `limit` from 1 to 10.
 - `/scout stop` safely stops a named project after its current network operation.
 - `/scout reports` lists generated report files.
 - `/scout get-report` uploads a small report file to Discord.

@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -6,6 +7,7 @@ import pytest
 from archive_scout.discord_bot import (
     JobManager,
     build_help_text,
+    live_matches_text,
     parse_snowflakes,
     parse_targets,
     safe_project_dir,
@@ -40,6 +42,39 @@ def test_help_text_explains_configured_concurrency() -> None:
     assert "mode:resume" in text
     assert "does not automatically repeat" in text
     assert len(text) <= 2000
+
+
+def test_live_matches_reads_running_scan_without_writing(tmp_path: Path) -> None:
+    project = tmp_path / "case-01"
+    project.mkdir()
+    database_path = project / "archive_scout.sqlite3"
+    database = sqlite3.connect(database_path)
+    database.executescript(
+        """
+        CREATE TABLE scan_runs(id INTEGER PRIMARY KEY,status TEXT,minimum_score INTEGER);
+        CREATE TABLE captures(id INTEGER PRIMARY KEY,original_url TEXT,timestamp TEXT);
+        CREATE TABLE documents(id INTEGER PRIMARY KEY,capture_id INTEGER,title TEXT);
+        CREATE TABLE document_matches(
+            id INTEGER PRIMARY KEY,scan_run_id INTEGER,document_id INTEGER,score INTEGER,
+            hits_json TEXT,snippets_json TEXT,excluded INTEGER,required_missing INTEGER
+        );
+        INSERT INTO scan_runs VALUES(1,'running',1);
+        INSERT INTO captures VALUES(1,'https://example.com/archive','20010911084600');
+        INSERT INTO documents VALUES(1,1,'Example match');
+        INSERT INTO document_matches VALUES(1,1,1,3,'{"needle":2}','[]',0,0);
+        """
+    )
+    database.commit()
+    before = database.total_changes
+
+    text = live_matches_text(tmp_path, "case-01", 5)
+
+    assert "1 qualifying match" in text
+    assert "Example match" in text
+    assert "needle x2" in text
+    assert "https://example.com/archive" in text
+    assert database.total_changes == before
+    database.close()
 
 
 def test_job_manager_allows_distinct_projects_up_to_limit(tmp_path: Path) -> None:
