@@ -43,6 +43,36 @@ def safe_project_dir(root: Path, name: str) -> Path:
     return candidate
 
 
+def project_name_choices(root: Path, current: str = "") -> list[str]:
+    """Return bounded project-name choices for Discord autocomplete."""
+    needle = current.casefold().strip()
+    if not root.exists():
+        return []
+    names = sorted(
+        (path.parent.name for path in root.glob("*/project.json")),
+        key=str.casefold,
+    )
+    return [name for name in names if needle in name.casefold()][:25]
+
+
+def report_name_choices(root: Path, project: str, current: str = "") -> list[str]:
+    """Return safe report paths for a selected project."""
+    try:
+        folder = safe_project_dir(root, project) / "reports"
+    except ValueError:
+        return []
+    if not folder.exists():
+        return []
+    needle = current.casefold().strip()
+    names = [
+        str(path.relative_to(folder))
+        for path in folder.rglob("*")
+        if path.is_file()
+    ]
+    names.sort(key=lambda name: (name != "all_matches_ranked.txt", name.casefold()))
+    return [name for name in names if len(name) <= 100 and needle in name.casefold()][:25]
+
+
 def parse_targets(primary: str, additional: str = "") -> list[str]:
     values = [primary, *re.split(r"[;\n]+", additional)]
     targets = list(dict.fromkeys(value.strip() for value in values if value.strip()))
@@ -150,7 +180,7 @@ The bot stays online 24/7 and can run up to **{max_concurrent_jobs} separate pro
 - `/scout stop project:case-one` - Safely stop one job.
 - `/scout run project:case-one mode:resume` - Continue an interrupted job.
 - `/scout reports project:case-one` - List its reports.
-- `/scout get-report` - Download a small report through Discord.
+- `/scout get-report project:case-one` - Download all successful matches as a text file. Choose the optional `report` field for another file.
 
 Different projects may run together, but the bot blocks two operations on the same project to protect its database. If every slot is busy, wait for a job to finish or stop one."""
 
@@ -306,10 +336,9 @@ class ScoutCog(commands.Cog):
     def __init__(self, bot: ArchiveScoutBot) -> None:
         self.bot = bot
 
-    async def authorized(self, interaction: discord.Interaction) -> bool:
+    def is_authorized(self, interaction: discord.Interaction) -> bool:
         settings = self.bot.settings
         if settings.guild_id and interaction.guild_id != settings.guild_id:
-            await interaction.response.send_message("This bot is not enabled in this server.", ephemeral=True)
             return False
         if interaction.user.id in settings.allowed_user_ids:
             return True
@@ -320,6 +349,14 @@ class ScoutCog(commands.Cog):
             permissions = getattr(interaction.user, "guild_permissions", None)
             if permissions and permissions.administrator:
                 return True
+        return False
+
+    async def authorized(self, interaction: discord.Interaction) -> bool:
+        if self.is_authorized(interaction):
+            return True
+        if self.bot.settings.guild_id and interaction.guild_id != self.bot.settings.guild_id:
+            await interaction.response.send_message("This bot is not enabled in this server.", ephemeral=True)
+            return False
         await interaction.response.send_message("You are not allowed to run Archive Scout.", ephemeral=True)
         return False
 
@@ -474,8 +511,17 @@ class ScoutCog(commands.Cog):
             text = str(exc)
         await interaction.response.send_message(text[:1900], ephemeral=True)
 
-    @scout.command(name="get-report", description="Upload one generated report to Discord")
-    async def get_report(self, interaction: discord.Interaction, project: str, report: str) -> None:
+    @scout.command(name="get-report", description="Download all matches or choose another report")
+    @app_commands.describe(
+        project="Project name",
+        report="Report file (defaults to all successful matches)",
+    )
+    async def get_report(
+        self,
+        interaction: discord.Interaction,
+        project: str,
+        report: str = "all_matches_ranked.txt",
+    ) -> None:
         if not await self.authorized(interaction):
             return
         try:
@@ -489,6 +535,30 @@ class ScoutCog(commands.Cog):
             await interaction.response.send_message(str(exc), ephemeral=True)
             return
         await interaction.response.send_message(file=discord.File(path), ephemeral=True)
+
+    @run.autocomplete("project")
+    @status.autocomplete("project")
+    @stop.autocomplete("project")
+    @matches.autocomplete("project")
+    @reports.autocomplete("project")
+    @get_report.autocomplete("project")
+    async def project_autocomplete(self, interaction: discord.Interaction, current: str):
+        if not self.is_authorized(interaction):
+            return []
+        return [
+            app_commands.Choice(name=name, value=name)
+            for name in project_name_choices(self.bot.settings.projects_root, current)
+        ]
+
+    @get_report.autocomplete("report")
+    async def report_autocomplete(self, interaction: discord.Interaction, current: str):
+        if not self.is_authorized(interaction):
+            return []
+        project = str(getattr(interaction.namespace, "project", "") or "")
+        return [
+            app_commands.Choice(name=name, value=name)
+            for name in report_name_choices(self.bot.settings.projects_root, project, current)
+        ]
 
 
 class ArchiveScoutBot(commands.Bot):

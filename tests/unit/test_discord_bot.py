@@ -10,6 +10,8 @@ from archive_scout.discord_bot import (
     live_matches_text,
     parse_snowflakes,
     parse_targets,
+    project_name_choices,
+    report_name_choices,
     safe_project_dir,
 )
 
@@ -34,6 +36,24 @@ def test_parse_multiple_targets() -> None:
         "www.example.com/*",
         "forum.example.com/*",
     ]
+
+
+def test_discord_autocomplete_lists_projects_and_reports(tmp_path: Path) -> None:
+    for name in ("Beta", "alpha"):
+        project = tmp_path / name
+        reports = project / "reports"
+        reports.mkdir(parents=True)
+        (project / "project.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "alpha" / "reports" / "summary.txt").write_text("summary", encoding="utf-8")
+    (tmp_path / "alpha" / "reports" / "all_matches_ranked.txt").write_text("matches", encoding="utf-8")
+
+    assert project_name_choices(tmp_path) == ["alpha", "Beta"]
+    assert project_name_choices(tmp_path, "BET") == ["Beta"]
+    assert report_name_choices(tmp_path, "alpha")[:2] == [
+        "all_matches_ranked.txt",
+        "summary.txt",
+    ]
+    assert report_name_choices(tmp_path, "../outside") == []
 
 
 def test_help_text_explains_configured_concurrency() -> None:
