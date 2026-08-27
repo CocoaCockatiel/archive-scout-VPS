@@ -72,6 +72,8 @@ docker compose exec -T archive-scout-bot tar -C /data -czf - projects > archive-
 - `/scout stop` safely stops a named project after its current network operation.
 - `/scout reports` lists generated report files.
 - `/scout get-report` uploads a small report file to Discord.
+- `all_matches_ranked.txt` combines every qualifying match for the project across original,
+  interrupted, and resumed scan runs. Per-scan `matches_ranked.txt` files remain available.
 
 Long jobs announce completion with a normal channel message rather than relying on the temporary
 slash-command interaction token.

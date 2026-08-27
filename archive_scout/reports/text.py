@@ -13,6 +13,7 @@ from ..downloads.downloader import replay_url
 from ..utils import atomic_write_lines, atomic_write_text, json_value, utc_now
 
 REPORT_NAMES = (
+    "all_matches_ranked.txt",
     "matches_ranked.txt",
     "matched_urls.txt",
     "wayback_urls.txt",
@@ -23,6 +24,22 @@ REPORT_NAMES = (
     "site_issues.txt",
     "summary.txt",
 )
+
+ALL_RANKED_SELECT = """
+    SELECT m.*,d.path,d.title,d.size_bytes,c.original_url,c.timestamp,c.mimetype,c.state,
+           sr.status AS scan_status,ks.name AS keyword_set_name,
+           COALESCE(r.status,'unreviewed') AS review_status,
+           COALESCE((SELECT text FROM notes n WHERE n.match_id=m.id ORDER BY n.id LIMIT 1),'') AS note,
+           COALESCE((SELECT GROUP_CONCAT(t.name, ', ') FROM match_tags mt JOIN tags t ON t.id=mt.tag_id WHERE mt.match_id=m.id),'') AS tags
+    FROM document_matches m
+    JOIN scan_runs sr ON sr.id=m.scan_run_id
+    JOIN keyword_sets ks ON ks.id=sr.keyword_set_id
+    JOIN documents d ON d.id=m.document_id
+    JOIN captures c ON c.id=d.capture_id
+    LEFT JOIN reviews r ON r.match_id=m.id
+    WHERE m.score>=sr.minimum_score AND m.excluded=0 AND m.required_missing=0
+    ORDER BY m.score DESC,c.timestamp,c.original_url,m.scan_run_id
+"""
 
 RANKED_SELECT = """
     SELECT m.*,d.path,d.title,d.size_bytes,c.original_url,c.timestamp,c.mimetype,c.state,
@@ -59,6 +76,46 @@ def _copy_latest(run_path: Path, latest_path: Path) -> None:
         os.link(run_path, latest_path)
     except OSError:
         shutil.copyfile(run_path, latest_path)
+
+
+def _all_ranked_lines(database: sqlite3.Connection) -> Iterator[str]:
+    """List every qualifying project match, including interrupted/resumed scans."""
+    for rank, row in enumerate(database.execute(ALL_RANKED_SELECT), 1):
+        hits = json_value(row["hits_json"], {})
+        fields = json_value(row["fields_json"], {})
+        snippets = json_value(row["snippets_json"], [])
+        links = json_value(row["interesting_links_json"], [])
+        hit_lines = [
+            f"{label}={count} [{','.join(fields.get(label, []))}]"
+            for label, count in sorted(hits.items(), key=lambda item: (-item[1], item[0].casefold()))
+        ]
+        snippet_lines = [f"  {index}. {snippet}" for index, snippet in enumerate(snippets, 1)] or ["  None"]
+        link_lines = [f"  {link}" for link in links] or ["  None"]
+        yield "\n".join(
+            [
+                "=" * 100,
+                f"RANK: {rank}",
+                f"SCORE: {row['score']}",
+                f"SCAN RUN: {row['scan_run_id']}",
+                f"SCAN STATUS: {row['scan_status']}",
+                f"KEYWORD SET: {row['keyword_set_name']}",
+                f"TIMESTAMP: {row['timestamp']}",
+                f"TITLE: {row['title'] or '(untitled)'}",
+                f"ORIGINAL URL: {row['original_url']}",
+                f"WAYBACK URL: {replay_url(row['timestamp'], row['original_url'])}",
+                f"LOCAL FILE: {row['path']}",
+                f"MIME TYPE: {row['mimetype'] or '(unknown)'}",
+                f"REVIEW STATUS: {row['review_status']}",
+                f"TAGS: {row['tags'] or '(none)'}",
+                f"NOTE: {row['note'] or '(none)'}",
+                f"KEYWORD HITS: {'; '.join(hit_lines) if hit_lines else 'None'}",
+                "SNIPPETS:",
+                *snippet_lines,
+                "INTERESTING LINKS:",
+                *link_lines,
+                "",
+            ]
+        )
 
 
 def generate_reports(
@@ -285,6 +342,10 @@ def generate_reports(
     latest_path = root_reports / "summary.txt"
     _copy_latest(run_path, latest_path)
     paths["summary"] = latest_path
+
+    all_matches_path = root_reports / "all_matches_ranked.txt"
+    atomic_write_lines(all_matches_path, _all_ranked_lines(database))
+    paths["all_matches_ranked"] = all_matches_path
 
     atomic_write_text(root_reports / "latest_scan_run.txt", f"{scan_run_id}\n{run_dir}\n")
     paths["scan_folder"] = run_dir
