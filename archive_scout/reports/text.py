@@ -80,7 +80,12 @@ def _copy_latest(run_path: Path, latest_path: Path) -> None:
 
 def _all_ranked_lines(database: sqlite3.Connection) -> Iterator[str]:
     """List every qualifying project match, including interrupted/resumed scans."""
+    yield "Archive Scout combined qualifying matches"
+    yield "Includes original, interrupted, and resumed scan runs."
+    yield ""
+    found = False
     for rank, row in enumerate(database.execute(ALL_RANKED_SELECT), 1):
+        found = True
         hits = json_value(row["hits_json"], {})
         fields = json_value(row["fields_json"], {})
         snippets = json_value(row["snippets_json"], [])
@@ -116,6 +121,19 @@ def _all_ranked_lines(database: sqlite3.Connection) -> Iterator[str]:
                 "",
             ]
         )
+    if not found:
+        yield "No qualifying matches have been found for this project."
+
+
+def generate_all_matches_report(
+    output_dir: Path,
+    database: sqlite3.Connection,
+) -> Path:
+    """Write the project-wide combined match report."""
+    path = output_dir / "reports" / "all_matches_ranked.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_lines(path, _all_ranked_lines(database))
+    return path
 
 
 def generate_reports(
@@ -343,8 +361,7 @@ def generate_reports(
     _copy_latest(run_path, latest_path)
     paths["summary"] = latest_path
 
-    all_matches_path = root_reports / "all_matches_ranked.txt"
-    atomic_write_lines(all_matches_path, _all_ranked_lines(database))
+    all_matches_path = generate_all_matches_report(config.output_dir, database)
     paths["all_matches_ranked"] = all_matches_path
 
     atomic_write_text(root_reports / "latest_scan_run.txt", f"{scan_run_id}\n{run_dir}\n")

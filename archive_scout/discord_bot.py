@@ -7,6 +7,7 @@ import os
 import re
 import sqlite3
 import threading
+import zipfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from discord.ext import commands
 from .config import KeywordSetConfig, ProjectConfig, save_project_config
 from .events import ProgressEvent, Stopped
 from .operations import SUPPORTED_MODES, run_project
+from .reports.text import generate_all_matches_report
 
 LOG = logging.getLogger("archive_scout.discord")
 PROJECT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
@@ -71,6 +73,44 @@ def report_name_choices(root: Path, project: str, current: str = "") -> list[str
     ]
     names.sort(key=lambda name: (name != "all_matches_ranked.txt", name.casefold()))
     return [name for name in names if len(name) <= 100 and needle in name.casefold()][:25]
+
+
+def ensure_all_matches_report(project_dir: Path) -> Path:
+    """Backfill a combined report for projects completed before it was introduced."""
+    path = project_dir / "reports" / "all_matches_ranked.txt"
+    if path.is_file() and path.stat().st_size:
+        return path
+    database_path = project_dir / "archive_scout.sqlite3"
+    if not database_path.is_file():
+        raise ValueError("This project has no scan results yet")
+    database = sqlite3.connect(database_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
+    database.row_factory = sqlite3.Row
+    try:
+        database.execute("PRAGMA query_only=ON")
+        database.execute("PRAGMA busy_timeout=10000")
+        return generate_all_matches_report(project_dir, database)
+    finally:
+        database.close()
+
+
+def uploadable_report_path(path: Path, max_bytes: int) -> Path:
+    """Compress an oversized text report into a Discord-sized ZIP when possible."""
+    if path.stat().st_size <= max_bytes:
+        return path
+    if path.suffix.casefold() == ".zip":
+        raise ValueError("Report is too large for the configured Discord upload limit")
+    archive = path.with_suffix(".zip")
+    if not archive.is_file() or archive.stat().st_mtime_ns < path.stat().st_mtime_ns:
+        temporary = archive.with_suffix(".zip.tmp")
+        try:
+            with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as bundle:
+                bundle.write(path, arcname=path.name)
+            temporary.replace(archive)
+        finally:
+            temporary.unlink(missing_ok=True)
+    if archive.stat().st_size > max_bytes:
+        raise ValueError("Report is too large for Discord even after ZIP compression")
+    return archive
 
 
 def parse_targets(primary: str, additional: str = "") -> list[str]:
@@ -524,17 +564,22 @@ class ScoutCog(commands.Cog):
     ) -> None:
         if not await self.authorized(interaction):
             return
+        await interaction.response.defer(ephemeral=True)
         try:
-            reports_dir = (safe_project_dir(self.bot.settings.projects_root, project) / "reports").resolve()
+            project_dir = safe_project_dir(self.bot.settings.projects_root, project)
+            reports_dir = (project_dir / "reports").resolve()
             path = (reports_dir / report).resolve()
+            if report == "all_matches_ranked.txt" and (not path.is_file() or not path.stat().st_size):
+                path = await asyncio.to_thread(ensure_all_matches_report, project_dir)
             if reports_dir not in path.parents or not path.is_file():
                 raise ValueError("Report not found")
-            if path.stat().st_size > self.bot.settings.max_upload_bytes:
-                raise ValueError("Report is too large for the configured Discord upload limit")
-        except ValueError as exc:
-            await interaction.response.send_message(str(exc), ephemeral=True)
+            path = await asyncio.to_thread(
+                uploadable_report_path, path, self.bot.settings.max_upload_bytes
+            )
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
             return
-        await interaction.response.send_message(file=discord.File(path), ephemeral=True)
+        await interaction.followup.send(file=discord.File(path), ephemeral=True)
 
     @run.autocomplete("project")
     @status.autocomplete("project")

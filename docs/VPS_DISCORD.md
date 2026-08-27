@@ -72,7 +72,9 @@ docker compose exec -T archive-scout-bot tar -C /data -czf - projects > archive-
 - `/scout stop` safely stops a named project after its current network operation.
 - `/scout reports` lists generated report files.
 - `/scout get-report` defaults to `all_matches_ranked.txt`; project and report fields provide
-  autocomplete, so downloading the combined text report only requires choosing a project.
+  autocomplete, so downloading the combined text report only requires choosing a project. The
+  bot backfills this report for older projects and ZIP-compresses it automatically if it exceeds
+  the configured Discord upload limit.
 - `all_matches_ranked.txt` combines every qualifying match for the project across original,
   interrupted, and resumed scan runs. Per-scan `matches_ranked.txt` files remain available.
 

@@ -13,6 +13,7 @@ from archive_scout.discord_bot import (
     project_name_choices,
     report_name_choices,
     safe_project_dir,
+    uploadable_report_path,
 )
 
 
@@ -54,6 +55,18 @@ def test_discord_autocomplete_lists_projects_and_reports(tmp_path: Path) -> None
         "summary.txt",
     ]
     assert report_name_choices(tmp_path, "../outside") == []
+
+
+def test_oversized_text_report_is_zipped_for_discord(tmp_path: Path) -> None:
+    report = tmp_path / "all_matches_ranked.txt"
+    report.write_text("repeated result\n" * 1000, encoding="utf-8")
+
+    upload = uploadable_report_path(report, 1000)
+
+    assert upload.suffix == ".zip"
+    assert upload.stat().st_size <= 1000
+    with __import__("zipfile").ZipFile(upload) as bundle:
+        assert bundle.namelist() == [report.name]
 
 
 def test_help_text_explains_configured_concurrency() -> None:
