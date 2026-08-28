@@ -19,11 +19,16 @@ from discord.ext import commands
 from .config import KeywordSetConfig, ProjectConfig, save_project_config
 from .events import ProgressEvent, Stopped
 from .operations import SUPPORTED_MODES, run_project
-from .reports.text import generate_all_matches_report
+from .reports.text import generate_all_matches_reports
 
 LOG = logging.getLogger("archive_scout.discord")
 PROJECT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 DISCORD_MODES = tuple(sorted(SUPPORTED_MODES - {"import_folder", "merge_project"}))
+COMBINED_REPORT_NAMES = (
+    "all_matches_ranked.md",
+    "all_matches_ranked.csv",
+    "all_matches_ranked.txt",
+)
 
 
 def parse_snowflakes(value: str | None) -> frozenset[int]:
@@ -71,13 +76,16 @@ def report_name_choices(root: Path, project: str, current: str = "") -> list[str
         for path in folder.rglob("*")
         if path.is_file()
     ]
-    names.sort(key=lambda name: (name != "all_matches_ranked.txt", name.casefold()))
+    priority = {name: index for index, name in enumerate(COMBINED_REPORT_NAMES)}
+    names.sort(key=lambda name: (priority.get(name, len(priority)), name.casefold()))
     return [name for name in names if len(name) <= 100 and needle in name.casefold()][:25]
 
 
-def ensure_all_matches_report(project_dir: Path) -> Path:
-    """Backfill a combined report for projects completed before it was introduced."""
-    path = project_dir / "reports" / "all_matches_ranked.txt"
+def ensure_all_matches_report(project_dir: Path, report_name: str) -> Path:
+    """Backfill combined reports for projects completed before they were introduced."""
+    if report_name not in COMBINED_REPORT_NAMES:
+        raise ValueError("Unknown combined report format")
+    path = project_dir / "reports" / report_name
     if path.is_file() and path.stat().st_size:
         return path
     database_path = project_dir / "archive_scout.sqlite3"
@@ -88,7 +96,8 @@ def ensure_all_matches_report(project_dir: Path) -> Path:
     try:
         database.execute("PRAGMA query_only=ON")
         database.execute("PRAGMA busy_timeout=10000")
-        return generate_all_matches_report(project_dir, database)
+        reports = generate_all_matches_reports(project_dir, database)
+        return next(report for report in reports.values() if report.name == report_name)
     finally:
         database.close()
 
@@ -99,9 +108,9 @@ def uploadable_report_path(path: Path, max_bytes: int) -> Path:
         return path
     if path.suffix.casefold() == ".zip":
         raise ValueError("Report is too large for the configured Discord upload limit")
-    archive = path.with_suffix(".zip")
+    archive = path.with_name(path.name + ".zip")
     if not archive.is_file() or archive.stat().st_mtime_ns < path.stat().st_mtime_ns:
-        temporary = archive.with_suffix(".zip.tmp")
+        temporary = archive.with_name(archive.name + ".tmp")
         try:
             with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as bundle:
                 bundle.write(path, arcname=path.name)
@@ -220,7 +229,7 @@ The bot stays online 24/7 and can run up to **{max_concurrent_jobs} separate pro
 - `/scout stop project:case-one` - Safely stop one job.
 - `/scout run project:case-one mode:resume` - Continue an interrupted job.
 - `/scout reports project:case-one` - List its reports.
-- `/scout get-report project:case-one` - Download all successful matches as a text file. Choose the optional `report` field for another file.
+- `/scout get-report project:case-one` - Download all successful matches as Markdown. Choose `all_matches_ranked.csv` in the optional `report` field for a spreadsheet.
 
 Different projects may run together, but the bot blocks two operations on the same project to protect its database. If every slot is busy, wait for a job to finish or stop one."""
 
@@ -551,16 +560,16 @@ class ScoutCog(commands.Cog):
             text = str(exc)
         await interaction.response.send_message(text[:1900], ephemeral=True)
 
-    @scout.command(name="get-report", description="Download all matches or choose another report")
+    @scout.command(name="get-report", description="Download matches as Markdown, CSV, or another report")
     @app_commands.describe(
         project="Project name",
-        report="Report file (defaults to all successful matches)",
+        report="Defaults to Markdown; choose CSV for Excel or Google Sheets",
     )
     async def get_report(
         self,
         interaction: discord.Interaction,
         project: str,
-        report: str = "all_matches_ranked.txt",
+        report: str = "all_matches_ranked.md",
     ) -> None:
         if not await self.authorized(interaction):
             return
@@ -569,8 +578,8 @@ class ScoutCog(commands.Cog):
             project_dir = safe_project_dir(self.bot.settings.projects_root, project)
             reports_dir = (project_dir / "reports").resolve()
             path = (reports_dir / report).resolve()
-            if report == "all_matches_ranked.txt" and (not path.is_file() or not path.stat().st_size):
-                path = await asyncio.to_thread(ensure_all_matches_report, project_dir)
+            if report in COMBINED_REPORT_NAMES and (not path.is_file() or not path.stat().st_size):
+                path = await asyncio.to_thread(ensure_all_matches_report, project_dir, report)
             if reports_dir not in path.parents or not path.is_file():
                 raise ValueError("Report not found")
             path = await asyncio.to_thread(

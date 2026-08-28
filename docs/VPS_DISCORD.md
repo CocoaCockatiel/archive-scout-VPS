@@ -71,12 +71,13 @@ docker compose exec -T archive-scout-bot tar -C /data -czf - projects > archive-
   pausing or modifying the running job. Set `limit` from 1 to 10.
 - `/scout stop` safely stops a named project after its current network operation.
 - `/scout reports` lists generated report files.
-- `/scout get-report` defaults to `all_matches_ranked.txt`; project and report fields provide
-  autocomplete, so downloading the combined text report only requires choosing a project. The
-  bot backfills this report for older projects and ZIP-compresses it automatically if it exceeds
-  the configured Discord upload limit.
-- `all_matches_ranked.txt` combines every qualifying match for the project across original,
-  interrupted, and resumed scan runs. Per-scan `matches_ranked.txt` files remain available.
+- `/scout get-report` defaults to `all_matches_ranked.md`; project and report fields provide
+  autocomplete, so downloading the readable combined report only requires choosing a project.
+  Choose `all_matches_ranked.csv` for Excel or Google Sheets. The bot backfills these reports for
+  older projects and ZIP-compresses them automatically if they exceed Discord's upload limit.
+- `all_matches_ranked.md`, `all_matches_ranked.csv`, and the compatibility
+  `all_matches_ranked.txt` combine every qualifying match across original, interrupted, and
+  resumed scan runs. Per-scan `matches_ranked.txt` files remain available.
 
 Long jobs announce completion with a normal channel message rather than relying on the temporary
 slash-command interaction token.

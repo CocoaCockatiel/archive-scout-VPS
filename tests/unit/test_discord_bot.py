@@ -45,12 +45,16 @@ def test_discord_autocomplete_lists_projects_and_reports(tmp_path: Path) -> None
         reports = project / "reports"
         reports.mkdir(parents=True)
         (project / "project.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "alpha" / "reports" / "summary.txt").write_text("summary", encoding="utf-8")
+    (tmp_path / "alpha" / "reports" / "all_matches_ranked.md").write_text("markdown", encoding="utf-8")
+    (tmp_path / "alpha" / "reports" / "all_matches_ranked.csv").write_text("csv", encoding="utf-8")
     (tmp_path / "alpha" / "reports" / "all_matches_ranked.txt").write_text("matches", encoding="utf-8")
+    (tmp_path / "alpha" / "reports" / "summary.txt").write_text("summary", encoding="utf-8")
 
     assert project_name_choices(tmp_path) == ["alpha", "Beta"]
     assert project_name_choices(tmp_path, "BET") == ["Beta"]
-    assert report_name_choices(tmp_path, "alpha")[:2] == [
+    assert report_name_choices(tmp_path, "alpha")[:4] == [
+        "all_matches_ranked.md",
+        "all_matches_ranked.csv",
         "all_matches_ranked.txt",
         "summary.txt",
     ]
@@ -64,9 +68,18 @@ def test_oversized_text_report_is_zipped_for_discord(tmp_path: Path) -> None:
     upload = uploadable_report_path(report, 1000)
 
     assert upload.suffix == ".zip"
+    assert upload.name == "all_matches_ranked.txt.zip"
     assert upload.stat().st_size <= 1000
     with __import__("zipfile").ZipFile(upload) as bundle:
         assert bundle.namelist() == [report.name]
+
+    spreadsheet = tmp_path / "all_matches_ranked.csv"
+    spreadsheet.write_text("value\n" * 1000, encoding="utf-8")
+    spreadsheet_upload = uploadable_report_path(spreadsheet, 1000)
+    assert spreadsheet_upload.name == "all_matches_ranked.csv.zip"
+    assert spreadsheet_upload != upload
+    with __import__("zipfile").ZipFile(spreadsheet_upload) as bundle:
+        assert bundle.namelist() == [spreadsheet.name]
 
 
 def test_help_text_explains_configured_concurrency() -> None:
