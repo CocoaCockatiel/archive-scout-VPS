@@ -133,7 +133,11 @@ class V105ReleaseTests(unittest.TestCase):
                 'media_kind': 'image',
                 'extension': '.jpg',
             }
-            path = media_path(root, row)
+            # ProjectConfig.normalized() canonicalizes output_dir. On macOS,
+            # /var resolves to /private/var; on Windows, an 8.3 temp path such as
+            # RUNNER~1 can resolve to its long form. Build the expected path from
+            # the normalized project root, exactly as fetch_media() does.
+            path = media_path(config.output_dir, row)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b'abc')
             client = unittest.mock.Mock()
