@@ -1,3 +1,33 @@
+# Archive Scout 1.0.4
+
+Archive Scout 1.0.4 is the high-throughput replay release. It preserves schema version 7 and the v1.0.3 resume-key CDX architecture while bringing text replay throughput much closer to the fast standalone Wayback downloader profile.
+
+## High-throughput text replay
+
+- New projects default to 10 text replay workers with 0.125-second request-start spacing, allowing up to eight replay starts per second while retaining the process-wide Wayback host gate.
+- Untouched v1.0.3 replay defaults (4 workers / 0.5 seconds) migrate automatically; customized replay settings are preserved.
+- Rust-backed `ahocorasick-rs` accelerates literal keyword discovery and releases the GIL while matching.
+- `selectolax`/Lexbor accelerates HTML title/text/link extraction, with the existing Python parser retained as a fallback.
+- Literal prefiltering now discovers candidates and positive matches in one traversal instead of scanning normalized fields twice.
+- Document hashing reuses the already-normalized visible body instead of normalizing it again.
+
+## Text formats
+
+Archive Scout now explicitly treats `.htm`, `.shtm`, `.dhtm`, `.xhtm`, `.phtm`, `.cgi`, `.php`, `.dat`, and `.txt` as scannable text-page formats, alongside the existing HTML/XML/JSON/script formats.
+
+## Index-only reports
+
+`Index URLs only` now writes `reports/all_indexed_urls.txt`, `reports/summary.txt`, `reports/errors.txt`, and `reports/site_issues.txt` immediately after CDX indexing. `Regenerate reports only` also works on an index-only project even when no scan run exists.
+
+## Compatibility
+
+- Public version: 1.0.4.
+- Database schema remains version 7.
+- Existing projects remain compatible.
+- Faster replay defaults retain coordinated HTTP 429/503 pauses, retries, bounded in-flight work, and saved resume state.
+
+---
+
 # Archive Scout 1.0.3
 
 Archive Scout 1.0.3 is the final performance-focused release. It keeps the 1.0.2 interface and feature set, but replaces the slowest acquisition architecture and applies a full hot-path optimization pass across indexing, media, scanning, analysis, reports, SQLite, and Research Intelligence.
@@ -41,7 +71,7 @@ Archive Scout 1.0.3 is the final performance-focused release. It keeps the 1.0.2
 
 ## Compatibility
 
-- Public version: 1.0.3.
+- Public version: 1.0.4.
 - Database schema remains version 7.
 - Existing 1.0.0–1.0.2 projects remain supported.
 - GUI, CLI/bot automation, AI providers, external embedded media, review/report workflows, project recovery, diagnostics, and Research Intelligence remain available.

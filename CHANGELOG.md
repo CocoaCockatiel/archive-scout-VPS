@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.4
+
+- Raised the default replay-download envelope to ten persistent workers with 0.125-second request-start spacing (up to eight starts/second), while retaining coordinated 429/503 host pauses, bounded in-flight work, retries, and resumability.
+- Added native `ahocorasick-rs` matching and `selectolax`/Lexbor HTML parsing to the hot scan path, with the existing Python implementations retained as safe fallbacks.
+- Removed a duplicate literal-prefilter traversal and reused the already-normalized body when computing document hashes.
+- Added legacy text-page extensions `.shtm`, `.dhtm`, `.xhtm`, `.phtm`, and `.dat`; existing `.htm`, `.cgi`, `.php`, and `.txt` support remains.
+- Fixed `Index URLs only` so it immediately writes `reports/all_indexed_urls.txt`, `summary.txt`, `errors.txt`, and `site_issues.txt`; report regeneration now also works for index-only projects without a scan run.
+
 ## 1.0.3
 
 - Replaced automatic numbered CDX paging with resume-key-first traversal for broad indexes, eliminating the thousands-of-pages failure mode on very large sites.

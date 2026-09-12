@@ -252,13 +252,13 @@ class ProjectConfig:
     cdx_collapses: list[str] = field(default_factory=lambda: ["urlkey"])
     cdx_match_type: str = ""
     cdx_extra_params: list[str] = field(default_factory=list)
-    workers: int = 4
+    workers: int = 10
     download_scope: str = "all_text"
     minimum_score: int = 1
     max_file_mb: float = 25.0
     page_size: int = 100000
     cdx_delay: float = 0.75
-    download_delay: float = 0.5
+    download_delay: float = 0.125
     retries: int = 4
     rate_limit_base_pause: float = 30.0
     rate_limit_max_pause: float = 300.0
@@ -440,6 +440,8 @@ def load_project_config(path: Path) -> ProjectConfig:
     loaded_cdx_delay = float(payload.get("cdx_delay", 0.75))
     loaded_page_blocks = int(network_payload.get("page_blocks", 0))
     loaded_cdx_workers = int(network_payload.get("cdx_workers", 10))
+    loaded_workers = int(payload.get("workers", 10))
+    loaded_download_delay = float(payload.get("download_delay", 0.125))
 
     # Preserve compatibility with early prerelease projects without exposing old
     # product branding. Only untouched historical default combinations are
@@ -480,6 +482,13 @@ def load_project_config(path: Path) -> ProjectConfig:
         and str(network_payload.get("index_strategy", "auto")).casefold() == "auto"
     ):
         loaded_page_size = 100000
+    # v1.0.3 shipped conservative replay defaults (4 workers, 0.5 s
+    # between request starts). Upgrade only that untouched pair to the v1.0.4
+    # high-throughput replay profile: ten persistent connections and eight
+    # request starts per second. Any custom value remains user-controlled.
+    if loaded_workers == 4 and loaded_download_delay == 0.5:
+        loaded_workers = 10
+        loaded_download_delay = 0.125
     return ProjectConfig(
         output_dir=Path(payload.get("output_dir") or path.parent),
         targets=list(payload.get("targets") or []),
@@ -494,13 +503,13 @@ def load_project_config(path: Path) -> ProjectConfig:
         cdx_collapses=list(payload["cdx_collapses"]) if "cdx_collapses" in payload else ["urlkey"],
         cdx_match_type=str(payload.get("cdx_match_type", "")),
         cdx_extra_params=list(payload.get("cdx_extra_params") or []),
-        workers=int(payload.get("workers", 4)),
+        workers=loaded_workers,
         download_scope=str(payload.get("download_scope", "all_text")),
         minimum_score=int(payload.get("minimum_score", 1)),
         max_file_mb=float(payload.get("max_file_mb", 25.0)),
         page_size=loaded_page_size,
         cdx_delay=loaded_cdx_delay,
-        download_delay=float(payload.get("download_delay", 0.5)),
+        download_delay=loaded_download_delay,
         retries=int(payload.get("retries", 4)),
         rate_limit_base_pause=float(payload.get("rate_limit_base_pause", 30.0)),
         rate_limit_max_pause=float(payload.get("rate_limit_max_pause", 300.0)),

@@ -1,0 +1,63 @@
+Archive Scout v1.0.4 patch-only release
+Base: Archive Scout v1.0.3 (archive-scout-main.zip baseline used for this patch)
+Database schema: 7 (unchanged)
+Date: 2026-09-11
+
+Scope:
+- High-throughput replay: 10 workers, 0.125-second shared request-start spacing (up to 8 starts/sec), persistent pooled HTTP, native matching/parsing accelerators with fallbacks, one-pass literal prefiltering, reduced duplicate parsing/normalization work.
+- Text formats: htm, shtm, dhtm, xhtm, phtm, cgi, php, dat, txt explicitly scan as text candidates.
+- Index URLs only: now emits reports/all_indexed_urls.txt, summary.txt, errors.txt, and site_issues.txt; report regeneration works without a scan run.
+- Version/release/build/test metadata updated to 1.0.4.
+
+Validation:
+- 187 tests run: 184 passed, 3 skipped in the local offline/headless environment.
+- Python compileall passed.
+- git diff --check passed.
+- Linux/macOS build scripts passed bash syntax validation.
+- Workflow YAML parsed successfully.
+- v1.0.4 wheel built successfully.
+- See SOURCE_VALIDATION.txt for details and remaining native/live-network release gates.
+
+Apply the unified patch from the root of a clean v1.0.3 checkout with:
+  git apply --check archive-scout-v1.0.4.patch
+  git apply archive-scout-v1.0.4.patch
+
+The rest of this ZIP contains only changed/new repository files, preserving their repository-relative paths. It is not a complete repository archive.
+
+Changed/new repository files:
+.github/workflows/build-and-release.yml
+.github/workflows/tests.yml
+CHANGELOG.md
+README.md
+RELEASE_NOTES.md
+REPOSITORY_DETAILS.md
+SOURCE_VALIDATION.txt
+UPLOAD_CHECKLIST.txt
+archive_scout/config.py
+archive_scout/constants.py
+archive_scout/content.py
+archive_scout/downloads/downloader.py
+archive_scout/operations.py
+archive_scout/parsing/embeds.py
+archive_scout/reports/text.py
+archive_scout/scanning/automaton.py
+archive_scout/scanning/keywords.py
+archive_scout/scanning/scoring.py
+archive_scout/ui/main_window.py
+docs/AUTOMATION.md
+docs/DEVELOPMENT.md
+docs/GITHUB_SETUP.md
+examples/ogrish_911.project.json
+examples/project.example.json
+github/workflows/tests.yml
+packaging/macos/README.md
+packaging/windows/version_info.txt
+pyproject.toml
+requirements-runtime.txt
+scripts/build_linux.sh
+scripts/build_macos.sh
+scripts/build_windows.ps1
+tests/unit/test_cli_automation.py
+tests/unit/test_network_tuning.py
+tests/unit/test_startup.py
+tests/unit/test_v104_release.py

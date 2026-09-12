@@ -173,7 +173,6 @@ class ArchiveScoutApp(tk.Tk):
 
     def create_variables(self) -> None:
         default_output = Path.home() / "Downloads" / "ArchiveScout"
-        cpu_count = os.cpu_count() or 4
         self.output_var = tk.StringVar(value=str(default_output))
         self.preset_var = tk.StringVar(value="Ogrish 9/11 research")
         self.mode_var = tk.StringVar(value="Index, download, scan, and report")
@@ -185,11 +184,11 @@ class ArchiveScoutApp(tk.Tk):
         self.collapse_urlkey_var = tk.BooleanVar(value=True)
         self.collapse_digest_var = tk.BooleanVar(value=False)
         self.page_size_var = tk.StringVar(value="100000")
-        self.workers_var = tk.StringVar(value=str(min(4, max(2, cpu_count))))
+        self.workers_var = tk.StringVar(value="10")
         self.max_file_var = tk.StringVar(value="25")
         self.minimum_score_var = tk.StringVar(value="1")
         self.cdx_delay_var = tk.StringVar(value="0.75")
-        self.download_delay_var = tk.StringVar(value="0.5")
+        self.download_delay_var = tk.StringVar(value="0.125")
         self.rate_limit_base_var = tk.StringVar(value="30")
         self.rate_limit_max_var = tk.StringVar(value="300")
         self.rate_limit_wait_var = tk.StringVar(value="15")
@@ -750,11 +749,11 @@ class ArchiveScoutApp(tk.Tk):
 
         ttk.Label(tab, text="Performance", style="Section.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
         performance = [
-            ("Download workers", self.workers_var),
+            ("Download workers (10 = fast default)", self.workers_var),
             ("Maximum text-page size (MB)", self.max_file_var),
             ("Minimum report score", self.minimum_score_var),
             ("CDX request spacing (seconds)", self.cdx_delay_var),
-            ("Download request spacing (seconds)", self.download_delay_var),
+            ("Download request spacing (0.125 = 8/sec)", self.download_delay_var),
             ("429/503 initial shared pause (seconds)", self.rate_limit_base_var),
             ("429/503 maximum shared pause (seconds)", self.rate_limit_max_var),
         ]

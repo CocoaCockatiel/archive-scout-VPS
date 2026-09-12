@@ -1,0 +1,1354 @@
+diff --git a/.github/workflows/build-and-release.yml b/.github/workflows/build-and-release.yml
+index 12f38b9..bf0afb7 100644
+--- a/.github/workflows/build-and-release.yml
++++ b/.github/workflows/build-and-release.yml
+@@ -51,7 +51,7 @@ jobs:
+       - name: Install build tools
+         run: python -m pip install --upgrade pip && python -m pip install -r requirements-build.txt
+       - name: Verify GUI, TLS, and HTTP pool support
+-        run: python -c "import tkinter, truststore, urllib3, httpx; print('Windows x64 runtime ready')"
++        run: python -c "import tkinter, truststore, urllib3, httpx, ahocorasick_rs; from selectolax.lexbor import LexborHTMLParser; print('Windows x64 runtime + native accelerators ready')"
+       - name: Require signing for tagged Windows releases
+         if: startsWith(github.ref, 'refs/tags/') && vars.ENABLE_WINDOWS_ARTIFACT_SIGNING != 'true'
+         shell: pwsh
+@@ -134,7 +134,7 @@ jobs:
+       - name: Install build tools
+         run: python -m pip install --upgrade pip && python -m pip install -r requirements-build.txt
+       - name: Verify GUI, TLS, and HTTP pool support
+-        run: python -c "import tkinter, truststore, urllib3, httpx; print('Linux x64 runtime ready')"
++        run: python -c "import tkinter, truststore, urllib3, httpx, ahocorasick_rs; from selectolax.lexbor import LexborHTMLParser; print('Linux x64 runtime + native accelerators ready')"
+       - name: Build Linux x64 package
+         run: bash scripts/build_linux.sh
+       - name: Verify Linux CLI executable
+@@ -171,7 +171,7 @@ jobs:
+         run: python -m pip install --upgrade pip && python -m pip install -r requirements-build.txt
+       - name: Verify Universal2 Python, GUI, TLS, and HTTP pool support
+         run: |
+-          python -c "import tkinter, truststore, urllib3, httpx; print('macOS runtime ready')"
++          python -c "import tkinter, truststore, urllib3, httpx, ahocorasick_rs; from selectolax.lexbor import LexborHTMLParser; print('macOS build runtime + native accelerators ready')"
+           PYTHON_BINARY="$(python -c 'import sys; print(sys.executable)')"
+           echo "Python executable: $PYTHON_BINARY"
+           lipo -archs "$PYTHON_BINARY"
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+index 08dd20d..e7abe2b 100644
+--- a/.github/workflows/tests.yml
++++ b/.github/workflows/tests.yml
+@@ -57,9 +57,10 @@ jobs:
+ 
+       - name: Verify imports and package metadata
+         run: >-
+-          python -c "import importlib.metadata, archive_scout, archive_scout.app, archive_scout.cli;
+-          assert importlib.metadata.version('archive-scout') == '1.0.3';
+-          print('Archive Scout import and metadata checks passed')"
++          python -c "import importlib.metadata, archive_scout, archive_scout.app, archive_scout.cli, ahocorasick_rs;
++          from selectolax.lexbor import LexborHTMLParser;
++          assert importlib.metadata.version('archive-scout') == '1.0.4';
++          print('Archive Scout native accelerator imports and metadata checks passed')"
+ 
+       - name: Run tests
+         run: python -m unittest discover -s tests -p "test_*.py" -v
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index d0a3c5d..b82db4d 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,13 @@
+ # Changelog
+ 
++## 1.0.4
++
++- Raised the default replay-download envelope to ten persistent workers with 0.125-second request-start spacing (up to eight starts/second), while retaining coordinated 429/503 host pauses, bounded in-flight work, retries, and resumability.
++- Added native `ahocorasick-rs` matching and `selectolax`/Lexbor HTML parsing to the hot scan path, with the existing Python implementations retained as safe fallbacks.
++- Removed a duplicate literal-prefilter traversal and reused the already-normalized body when computing document hashes.
++- Added legacy text-page extensions `.shtm`, `.dhtm`, `.xhtm`, `.phtm`, and `.dat`; existing `.htm`, `.cgi`, `.php`, and `.txt` support remains.
++- Fixed `Index URLs only` so it immediately writes `reports/all_indexed_urls.txt`, `summary.txt`, `errors.txt`, and `site_issues.txt`; report regeneration now also works for index-only projects without a scan run.
++
+ ## 1.0.3
+ 
+ - Replaced automatic numbered CDX paging with resume-key-first traversal for broad indexes, eliminating the thousands-of-pages failure mode on very large sites.
+diff --git a/README.md b/README.md
+index a292393..84bd8eb 100644
+--- a/README.md
++++ b/README.md
+@@ -2,13 +2,13 @@
+ 
+ Archive Scout is a cross-platform desktop research workspace for indexing, downloading, searching, reviewing, reconstructing, and analyzing public captures from the Internet Archive's Wayback Machine.
+ 
+-Archive Scout 1.0.3 is the final performance-focused release. It preserves the established project workflow and Research Intelligence/automation features while replacing the large-site CDX bottleneck with resume-key-first indexing and optimizing the major local, database, media, analysis, and research hot paths.
++Archive Scout 1.0.4 is the high-throughput replay release. It preserves the v1.0.3 resume-key CDX architecture and established research workflow while raising the text replay envelope to ten workers/eight starts per second, accelerating HTML and literal keyword processing with native backends, expanding legacy text-page formats, and fixing index-only reports.
+ 
+ ## Downloads
+ 
+-- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.3/ArchiveScout-Windows-x64.zip)
+-- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.3/ArchiveScout-Linux-x64.zip)
+-- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.3/ArchiveScout-macOS-Universal.zip)
++- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.4/ArchiveScout-Windows-x64.zip)
++- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.4/ArchiveScout-Linux-x64.zip)
++- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.4/ArchiveScout-macOS-Universal.zip)
+ 
+ ## Core workflow
+ 
+@@ -30,7 +30,7 @@ Archive Scout stores project state in SQLite so long jobs can be stopped and res
+ 
+ ## Research Intelligence
+ 
+-Archive Scout 1.0.3 treats a completed project as one evidence corpus. The local research index combines full-text evidence, compact vectors, extracted entities/identifiers, duplicate clusters, deterministic Archive Scout scores, hyperlinks, provenance relationships, reconstructed forum relationships, and capture timestamps.
++Archive Scout 1.0.4 treats a completed project as one evidence corpus. The local research index combines full-text evidence, compact vectors, extracted entities/identifiers, duplicate clusters, deterministic Archive Scout scores, hyperlinks, provenance relationships, reconstructed forum relationships, and capture timestamps.
+ 
+ The **Research intelligence** tab can:
+ 
+@@ -137,7 +137,7 @@ The execution engine is designed around bounded work rather than project-sized i
+ - keyset pagination for large local tables;
+ - bulk capture and queue writes;
+ - resumable CDX pages and resume keys;
+-- fixed shared request-start pacing with bounded overlap;
++- high-throughput text replay defaults (10 workers, 0.125-second shared request-start spacing) with bounded overlap;
+ - endpoint/backend recovery and date-window subdivision for transient CDX failures;
+ - bounded local parallel rescanning;
+ - stored-parse reuse for unchanged documents;
+@@ -149,7 +149,9 @@ The execution engine is designed around bounded work rather than project-sized i
+ 
+ The offline benchmark runner can exercise large CDX parsing, database insertion, result pagination, keyword matching, and no-op repeated indexing without contacting the Internet Archive.
+ 
+-### Resume-key-first indexing in 1.0.3
++Text-capture discovery explicitly recognizes legacy web/page formats including `.htm`, `.shtm`, `.dhtm`, `.xhtm`, `.phtm`, `.cgi`, `.php`, `.dat`, and `.txt` in addition to the existing HTML/XML/JSON/script formats.
++
++### Resume-key-first indexing in 1.0.4
+ 
+ Automatic indexing no longer asks Wayback for a numbered page count. Large targets are traversed in resumable 100,000-row CDX batches using `showResumeKey=true`, so performance scales with returned rows instead of Wayback's internal ZipNum page topology. This removes the pathological `page 1 / thousands` workflow that could take days or weeks on very large sites.
+ 
+diff --git a/RELEASE_NOTES.md b/RELEASE_NOTES.md
+index b6cc211..9bb2517 100644
+--- a/RELEASE_NOTES.md
++++ b/RELEASE_NOTES.md
+@@ -1,3 +1,33 @@
++# Archive Scout 1.0.4
++
++Archive Scout 1.0.4 is the high-throughput replay release. It preserves schema version 7 and the v1.0.3 resume-key CDX architecture while bringing text replay throughput much closer to the fast standalone Wayback downloader profile.
++
++## High-throughput text replay
++
++- New projects default to 10 text replay workers with 0.125-second request-start spacing, allowing up to eight replay starts per second while retaining the process-wide Wayback host gate.
++- Untouched v1.0.3 replay defaults (4 workers / 0.5 seconds) migrate automatically; customized replay settings are preserved.
++- Rust-backed `ahocorasick-rs` accelerates literal keyword discovery and releases the GIL while matching.
++- `selectolax`/Lexbor accelerates HTML title/text/link extraction, with the existing Python parser retained as a fallback.
++- Literal prefiltering now discovers candidates and positive matches in one traversal instead of scanning normalized fields twice.
++- Document hashing reuses the already-normalized visible body instead of normalizing it again.
++
++## Text formats
++
++Archive Scout now explicitly treats `.htm`, `.shtm`, `.dhtm`, `.xhtm`, `.phtm`, `.cgi`, `.php`, `.dat`, and `.txt` as scannable text-page formats, alongside the existing HTML/XML/JSON/script formats.
++
++## Index-only reports
++
++`Index URLs only` now writes `reports/all_indexed_urls.txt`, `reports/summary.txt`, `reports/errors.txt`, and `reports/site_issues.txt` immediately after CDX indexing. `Regenerate reports only` also works on an index-only project even when no scan run exists.
++
++## Compatibility
++
++- Public version: 1.0.4.
++- Database schema remains version 7.
++- Existing projects remain compatible.
++- Faster replay defaults retain coordinated HTTP 429/503 pauses, retries, bounded in-flight work, and saved resume state.
++
++---
++
+ # Archive Scout 1.0.3
+ 
+ Archive Scout 1.0.3 is the final performance-focused release. It keeps the 1.0.2 interface and feature set, but replaces the slowest acquisition architecture and applies a full hot-path optimization pass across indexing, media, scanning, analysis, reports, SQLite, and Research Intelligence.
+@@ -41,7 +71,7 @@ Archive Scout 1.0.3 is the final performance-focused release. It keeps the 1.0.2
+ 
+ ## Compatibility
+ 
+-- Public version: 1.0.3.
++- Public version: 1.0.4.
+ - Database schema remains version 7.
+ - Existing 1.0.0–1.0.2 projects remain supported.
+ - GUI, CLI/bot automation, AI providers, external embedded media, review/report workflows, project recovery, diagnostics, and Research Intelligence remain available.
+diff --git a/REPOSITORY_DETAILS.md b/REPOSITORY_DETAILS.md
+index ee6244f..1494079 100644
+--- a/REPOSITORY_DETAILS.md
++++ b/REPOSITORY_DETAILS.md
+@@ -1,7 +1,7 @@
+ # Repository details
+ 
+ Product: Archive Scout
+-Version: 1.0.3
++Version: 1.0.4
+ License: MIT
+ Python: 3.11+
+ Desktop UI: Tkinter/ttk
+diff --git a/SOURCE_VALIDATION.txt b/SOURCE_VALIDATION.txt
+index a5ceef5..d472222 100644
+--- a/SOURCE_VALIDATION.txt
++++ b/SOURCE_VALIDATION.txt
+@@ -1,66 +1,58 @@
+-Archive Scout 1.0.3 source validation
+-Date: 2026-08-26
++Archive Scout 1.0.4 source validation
++Date: 2026-09-11
+ 
+ Release scope
+-- Final performance-focused release built on the complete 1.0.2 feature set and interface.
+-- Indexing: automatic broad/direct-media CDX traversal is resume-key-first, uses 100,000-row batches by default, preserves explicit paged compatibility mode, and converts unfinished 1.0.2 numbered queues without deleting already indexed captures.
+-- Acquisition resilience: large resume windows retain adaptive subdivision, saved queue state, shared Wayback pacing, finite pause budgets, and coordinated 429/503 recovery.
+-- Media: faster persistent external-embed discovery, exact-CDX resolution, URL-policy caching, fewer parser passes, batched database work, and the same row-scaled resume strategy as normal indexing.
+-- Scanning/analysis: lower-allocation keyword candidate selection, faster proximity scoring, batched analysis persistence, optimized first-appearance search, and no-op reuse of unchanged work.
+-- Research Intelligence: bulk metadata/relationship retrieval, SQL-side stale cleanup, incremental graph rebuilds, and fewer project-sized Python allocations.
+-- Database/reporting: faster compact CDX ingestion, index-assisted error lookup, additional safe indexes, throttled operation-progress persistence, and cheaper latest-report publication where hardlinks are supported.
+-- Existing AI relevance, bot/CLI automation, deterministic scoring, human review, reports, external media, project safety, and schema-v7 compatibility are preserved.
++- High-throughput replay release built on the complete v1.0.3 resume-key indexing architecture and schema version 7.
++- Replay acquisition: new projects use 10 workers with 0.125-second shared request-start spacing (up to eight starts/second) while retaining bounded in-flight work, persistent HTTP pools, saved resume state, retries, and coordinated Wayback 429/503 host gating.
++- Existing projects using the legacy untouched 4-worker / 0.5-second replay defaults migrate to the new fast defaults; deliberately customized worker/delay pairs remain unchanged.
++- Parsing/scanning: native ahocorasick-rs and selectolax/Lexbor paths are declared for packaged/source installs, with the established Python implementations retained as runtime fallbacks.
++- Hot-path work: literal candidate discovery and positive-match detection share one traversal, the already-normalized body is reused for normalized document hashing, and normal text downloads avoid a second full legacy-embed HTML-parser pass.
++- Text coverage: .htm, .shtm, .dhtm, .xhtm, .phtm, .cgi, .php, .dat, and .txt are explicitly scannable text-page formats.
++- Index-only reporting: Index URLs only now writes all_indexed_urls.txt, summary.txt, errors.txt, and site_issues.txt immediately; report regeneration also works for indexed projects with no scan run.
++- Existing AI relevance, Research Intelligence, external-media workflows, deterministic scoring, review state, bot/CLI automation, project safety, and schema-v7 compatibility are preserved.
+ 
+ Automated validation
+-- 178 automated tests completed successfully.
+-- 1 display-dependent theme test was skipped because no graphical display is available in this environment.
+-- All existing database migration tests passed; database schema remains version 7 and no migration is required from 1.0.2.
++- 187 automated tests ran: 184 passed and 3 were skipped.
++- 3 tests were skipped in this environment: 1 display-dependent theme test and 2 native-accelerator execution tests because those wheels are not installed locally. The CI matrix installs the declared runtime dependencies and executes those native-path tests.
++- New v1.0.4 regression coverage verifies requested legacy text extensions, page parsing, fast legacy-embed recovery, one-pass prefilter scoring semantics, fast-default migration/custom-setting preservation, and index-only report generation/regeneration without a scan run.
++- All existing database migration tests passed; database schema remains version 7 and no migration is required from v1.0.3.
+ - Python compilation completed for archive_scout, tests, scripts, run_app.py, and run_cli.py.
+-- .github/workflows/tests.yml parsed successfully as YAML.
+-- .github/workflows/build-and-release.yml parsed successfully as YAML.
+ - scripts/build_linux.sh passed bash syntax validation.
+-- scripts/build_macos.sh passed bash syntax validation.
++- scripts/build_macos.sh passed bash syntax validation. Its Universal2 packaging path architecture-checks native extension binaries and falls back instead of bundling a thin single-architecture accelerator.
+ - git diff --check passed.
+-- Python wheel packaging completed successfully as archive_scout-1.0.3-py3-none-any.whl using pip --no-build-isolation.
+-- Public application/package version is 1.0.3.
++- Python wheel packaging completed successfully as archive_scout-1.0.4-py3-none-any.whl using pip --no-build-isolation.
++- Wheel SHA256: b463302061402590c0b0d634619bb158008847c46ff3c8ed66115b8887e59ba5.
++- Public application/package version is 1.0.4.
+ - Database schema version is 7.
+ 
+-Indexing validation
+-- Automatic indexing selects resume-key traversal and does not depend on showNumPages/numbered-page enumeration.
+-- Automatic resume requests include urlkey in the CDX field list for reliable continuation and request 100,000 rows by default.
+-- Explicit paged strategy remains available for compatibility and diagnostics.
+-- An unfinished normal numbered queue with thousands of saved pages converts to resume traversal while retaining its date window and already committed captures.
+-- An unfinished direct-media numbered queue converts the same way.
+-- Automatic media indexing no longer turns automatic page grouping into pageSize=1.
+-- URLs containing spaces remain intact in line-oriented urlkey CDX responses and resume tokens are preserved.
+-- Untouched 1.0.2 50,000-row network defaults upgrade to 100,000 rows; deliberately customized values remain customized.
+-- Existing timeout subdivision, resume persistence, shared Wayback pacing, finite pause budgets, headerless 503 coordination, site-issue circuits, and interruption recovery remain covered by the full suite.
++Replay-performance validation
++- The default text/media replay request envelope is 10 workers with 0.125-second shared start spacing, matching an eight-starts/second high-throughput profile while preserving Archive Scout's process-wide host gate and recovery policy.
++- The HTTP pool size follows the worker count, allowing ten persistent connections to overlap Wayback latency without project-sized task creation.
++- Existing bounded-inflight scheduling remains max(workers, workers*2), so the faster request envelope does not create an unbounded memory queue.
++- The native Aho-Corasick path releases Python-side matching work from the pure-Python automaton hot loop when the packaged dependency is present; the Python automaton remains a behavioral fallback.
++- The native Lexbor path performs title, visible-text, and ordinary-link extraction from one DOM parse when selectolax is present; the Python HTMLParser remains a behavioral fallback.
++- Normal download processing no longer runs the exhaustive legacy embed HTML parser immediately after ordinary page parsing; a lightweight source pass recovers old FlashVars/player configuration and the dedicated media-discovery workflow retains exhaustive parsing.
+ 
+-Performance-path validation
+-- Compact CDX tuples and mapping-form CDX rows persist with identical repository semantics.
+-- Repeated unchanged CDX rows remain no-op database writes.
+-- Keyword scoring retains exact aggregate score semantics in regression coverage while using lower-allocation candidate/proximity paths.
+-- External media discovery/retry, streamed media transfer, local rescan reuse, Research Intelligence, and analysis workflows remain covered by integration/unit tests.
++Index-only report validation
++- A synthetic index-only operation persisted a capture and immediately produced reports/all_indexed_urls.txt and reports/summary.txt.
++- The indexed URL appeared in all_indexed_urls.txt and the summary reported the correct indexed-capture count.
++- Regenerate reports subsequently succeeded on the same project without a scan_run row.
+ 
+ Offline 100,000-row performance validation
+-- 100,000 CDX rows parsed in 2.385 seconds.
+-- Parse-and-upsert completed in 4.428 seconds.
+-- Repeating the same 100,000-row index produced 0 unchanged-row database writes.
+-- Parser peak traced memory: 23,847,090 bytes.
++- 100,000 CDX rows parsed in 2.274489 seconds.
++- Literal prefilter benchmark completed in 0.521402 seconds.
++- Literal scoring benchmark completed in 0.504734 seconds.
++- Parse-and-upsert completed in 3.879936 seconds.
++- Repeating the same 100,000-row index completed in 2.993555 seconds and produced 0 unchanged-row database writes.
++- Result browsing (500 rows) completed in 0.010575 seconds.
++- JSON export completed in 0.652593 seconds.
+ - HTTP attempts: 0.
+-- Duplicate work: 0.
+-
+-Offline 1,000,000-row parser validation
+-- 1,000,000 CDX rows parsed in 24.096 seconds.
+-- Parser peak traced memory: 24,047,096 bytes.
+-- HTTP attempts: 0.
+-- Duplicate work: 0.
+ 
+ Release limitations / remaining gates
+-- The offline benchmark is deterministic and does not claim a guaranteed live Internet Archive wall-clock speedup; Wayback server load and target shape remain external variables.
++- Offline/source validation does not claim a guaranteed live Internet Archive completion rate; Wayback latency, throttling, capture size, and page complexity remain external variables. The v1.0.4 defaults match the standalone downloader's eight-request-starts/second envelope and can show higher short-window completion bursts when requests finish together.
+ - A live Internet Archive large-site stress test was not performed in this validation environment.
++- The current validation container has no package-index network access, so the newly declared native accelerator wheels could not be installed and runtime-exercised here; the full source suite therefore exercised the retained Python fallback paths. The build/test workflow installs the runtime dependency set and must verify native imports/package smoke tests before the release tag is published.
+ - Native Windows, macOS, and Linux distributable binaries were not produced in this container because PyInstaller is not installed here.
+-- Build definitions were validated locally; GitHub Actions must produce and smoke-test the actual native GUI and ArchiveScoutCLI packages.
++- GitHub Actions must produce and smoke-test the actual native GUI and ArchiveScoutCLI packages on the release commit.
+ - Real Windows signing, macOS signing/notarization, and release-upload transactions were not performed.
+-- A live external AI-provider request was not performed because validation does not use user credentials.
+-- Publish tag v1.0.3 only after the GitHub Actions matrix and native package smoke tests pass on the exact patched release commit.
++- Publish tag v1.0.4 only after the GitHub Actions matrix and native package smoke tests pass on the exact patched release commit.
+diff --git a/UPLOAD_CHECKLIST.txt b/UPLOAD_CHECKLIST.txt
+index 5566327..327fb52 100644
+--- a/UPLOAD_CHECKLIST.txt
++++ b/UPLOAD_CHECKLIST.txt
+@@ -1,7 +1,7 @@
+-ARCHIVE SCOUT 1.0.3 RELEASE CHECKLIST
++ARCHIVE SCOUT 1.0.4 RELEASE CHECKLIST
+ 
+-1. Confirm pyproject.toml and archive_scout/constants.py both report 1.0.3.
+-2. Confirm schema version is 6 and migration tests pass from supported older schemas.
++1. Confirm pyproject.toml and archive_scout/constants.py both report 1.0.4.
++2. Confirm schema version is 7 and migration tests pass from supported older schemas.
+ 3. Run the complete Tests workflow on Linux, Windows, Intel macOS, and Apple Silicon macOS for Python 3.11 and 3.12.
+ 4. Confirm the offline benchmark smoke test passes without Internet Archive network access.
+ 5. Confirm AI relevance tests use mocked API responses and do not require a live API key.
+@@ -13,5 +13,5 @@ ARCHIVE SCOUT 1.0.3 RELEASE CHECKLIST
+ 11. Confirm the packaged macOS application passes its frozen-runtime and startup probes.
+ 12. Confirm tagged Windows release packaging is signed and the signature verifies.
+ 13. Verify all release checksums.
+-14. Create the v1.0.3 tag only from the validated release commit.
++14. Create the v1.0.4 tag only from the validated release commit.
+ 15. Publish release assets only after all native builds and smoke tests succeed.
+diff --git a/archive_scout/config.py b/archive_scout/config.py
+index 6b229fd..c14cedb 100644
+--- a/archive_scout/config.py
++++ b/archive_scout/config.py
+@@ -252,13 +252,13 @@ class ProjectConfig:
+     cdx_collapses: list[str] = field(default_factory=lambda: ["urlkey"])
+     cdx_match_type: str = ""
+     cdx_extra_params: list[str] = field(default_factory=list)
+-    workers: int = 4
++    workers: int = 10
+     download_scope: str = "all_text"
+     minimum_score: int = 1
+     max_file_mb: float = 25.0
+     page_size: int = 100000
+     cdx_delay: float = 0.75
+-    download_delay: float = 0.5
++    download_delay: float = 0.125
+     retries: int = 4
+     rate_limit_base_pause: float = 30.0
+     rate_limit_max_pause: float = 300.0
+@@ -440,6 +440,8 @@ def load_project_config(path: Path) -> ProjectConfig:
+     loaded_cdx_delay = float(payload.get("cdx_delay", 0.75))
+     loaded_page_blocks = int(network_payload.get("page_blocks", 0))
+     loaded_cdx_workers = int(network_payload.get("cdx_workers", 10))
++    loaded_workers = int(payload.get("workers", 10))
++    loaded_download_delay = float(payload.get("download_delay", 0.125))
+ 
+     # Preserve compatibility with early prerelease projects without exposing old
+     # product branding. Only untouched historical default combinations are
+@@ -480,6 +482,13 @@ def load_project_config(path: Path) -> ProjectConfig:
+         and str(network_payload.get("index_strategy", "auto")).casefold() == "auto"
+     ):
+         loaded_page_size = 100000
++    # v1.0.3 shipped conservative replay defaults (4 workers, 0.5 s
++    # between request starts). Upgrade only that untouched pair to the v1.0.4
++    # high-throughput replay profile: ten persistent connections and eight
++    # request starts per second. Any custom value remains user-controlled.
++    if loaded_workers == 4 and loaded_download_delay == 0.5:
++        loaded_workers = 10
++        loaded_download_delay = 0.125
+     return ProjectConfig(
+         output_dir=Path(payload.get("output_dir") or path.parent),
+         targets=list(payload.get("targets") or []),
+@@ -494,13 +503,13 @@ def load_project_config(path: Path) -> ProjectConfig:
+         cdx_collapses=list(payload["cdx_collapses"]) if "cdx_collapses" in payload else ["urlkey"],
+         cdx_match_type=str(payload.get("cdx_match_type", "")),
+         cdx_extra_params=list(payload.get("cdx_extra_params") or []),
+-        workers=int(payload.get("workers", 4)),
++        workers=loaded_workers,
+         download_scope=str(payload.get("download_scope", "all_text")),
+         minimum_score=int(payload.get("minimum_score", 1)),
+         max_file_mb=float(payload.get("max_file_mb", 25.0)),
+         page_size=loaded_page_size,
+         cdx_delay=loaded_cdx_delay,
+-        download_delay=float(payload.get("download_delay", 0.5)),
++        download_delay=loaded_download_delay,
+         retries=int(payload.get("retries", 4)),
+         rate_limit_base_pause=float(payload.get("rate_limit_base_pause", 30.0)),
+         rate_limit_max_pause=float(payload.get("rate_limit_max_pause", 300.0)),
+diff --git a/archive_scout/constants.py b/archive_scout/constants.py
+index 30dfa9a..0252755 100644
+--- a/archive_scout/constants.py
++++ b/archive_scout/constants.py
+@@ -1,6 +1,6 @@
+ from __future__ import annotations
+ 
+-VERSION = "1.0.3"
++VERSION = "1.0.4"
+ SCHEMA_VERSION = 7
+ APP_NAME = "Archive Scout"
+ CDX_URL = "https://web.archive.org/cdx/search/cdx"
+@@ -10,8 +10,9 @@ CDX_ENDPOINTS = (CDX_URL, CDX_TIMEMAP_URL, CDX_TIMEMAP_JSON_URL)
+ REPLAY_URL = "https://web.archive.org/web"
+ RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
+ TEXT_EXTENSIONS = {
+-    ".asp", ".aspx", ".cfm", ".cgi", ".css", ".htm", ".html", ".inc",
+-    ".js", ".json", ".jsp", ".php", ".shtml", ".text", ".txt", ".xhtml", ".xml"
++    ".asp", ".aspx", ".cfm", ".cgi", ".css", ".dat", ".dhtm", ".htm", ".html", ".inc",
++    ".js", ".json", ".jsp", ".phtm", ".php", ".shtm", ".shtml", ".text", ".txt",
++    ".xhtm", ".xhtml", ".xml"
+ }
+ IMAGE_EXTENSIONS = {
+     ".avif", ".bmp", ".gif", ".heic", ".heif", ".ico", ".jfif", ".jpeg",
+diff --git a/archive_scout/content.py b/archive_scout/content.py
+index d96026d..4535f6f 100644
+--- a/archive_scout/content.py
++++ b/archive_scout/content.py
+@@ -6,6 +6,11 @@ import urllib.parse
+ from html.parser import HTMLParser
+ from pathlib import Path
+ 
++try:
++    from selectolax.lexbor import LexborHTMLParser
++except Exception:  # pragma: no cover - fallback retained for source-only environments
++    LexborHTMLParser = None
++
+ from .constants import BINARY_EXTENSIONS, TEXT_EXTENSIONS
+ from .utils import clean_space
+ 
+@@ -132,22 +137,53 @@ def is_text_candidate(url: str, mimetype: str = "") -> bool:
+ 
+ 
+ def parse_page(raw: str, original: str) -> tuple[str, str, list[str]]:
+-    parser = PageParser()
+-    try:
+-        parser.feed(raw)
+-    except Exception:
+-        pass
+-    visible = clean_space(" ".join(parser.text))
+     links: set[str] = set()
+-    for value in parser.links:
+-        normalized = normalize_link(value, original)
+-        if normalized:
+-            links.add(normalized)
++    title = ""
++    visible = ""
++    if LexborHTMLParser is not None:
++        try:
++            tree = LexborHTMLParser(raw)
++            title_node = tree.css_first("title")
++            if title_node is not None:
++                title = clean_space(title_node.text(deep=True, separator=" ", strip=True))[:500]
++            root = tree.root
++            if root is not None:
++                for node in root.traverse():
++                    attrs = node.attributes
++                    for key in ("href", "src", "data", "poster", "action", "movie"):
++                        value = attrs.get(key)
++                        if value:
++                            normalized = normalize_link(value, original)
++                            if normalized:
++                                links.add(normalized)
++                for tag in ("script", "style", "noscript", "svg"):
++                    for node in tree.css(tag):
++                        node.decompose()
++                text_root = tree.body or tree.root
++                if text_root is not None:
++                    visible = clean_space(text_root.text(deep=True, separator=" ", strip=True))
++        except Exception:
++            title = ""
++            visible = ""
++            links.clear()
++    if not visible and not links:
++        parser = PageParser()
++        try:
++            parser.feed(raw)
++        except Exception:
++            pass
++        visible = clean_space(" ".join(parser.text))
++        for value in parser.links:
++            normalized = normalize_link(value, original)
++            if normalized:
++                links.add(normalized)
++    if not title:
++        title = title_from_html(raw)
+     for value in URL_PATTERN.findall(raw):
+         normalized = normalize_link(value, original)
+         if normalized:
+             links.add(normalized)
+-    return title_from_html(raw), visible, sorted(links)
++    return title, visible, sorted(links)
+ 
+ 
+ def classify_replay_content(raw: str, final_url: str) -> str | None:
+diff --git a/archive_scout/downloads/downloader.py b/archive_scout/downloads/downloader.py
+index 1367648..5904c7e 100644
+--- a/archive_scout/downloads/downloader.py
++++ b/archive_scout/downloads/downloader.py
+@@ -16,7 +16,7 @@ from ..constants import REPLAY_URL
+ from ..content import classify_replay_content, decode_bytes, is_text_candidate, looks_textual_bytes, parse_page
+ from ..database.repositories import record_error, record_site_issue, resolve_errors, save_match, upsert_document
+ from ..events import ProgressEvent, Stopped
+-from ..parsing.embeds import extract_embed_candidates
++from ..parsing.embeds import extract_embed_candidates_fast
+ from ..site_status import host_from_url, should_surface_site_issue, site_issue_message
+ from ..scanning.jobs import ScanJob
+ from ..scanning.keywords import compile_prefilter
+@@ -208,12 +208,12 @@ def fetch_parse_scan(row: sqlite3.Row, config: ProjectConfig, jobs: list[ScanJob
+     if replay_problem:
+         raise RuntimeError(replay_problem)
+     title, visible, links = parse_page(raw, original)
+-    # Reuse the bytes already in memory to recover legacy player/config URLs.
+-    # The dedicated media-discovery pass still rechecks the saved page with tag
+-    # context, but persisting these URLs here avoids losing embeds that are only
+-    # represented in FlashVars or old JavaScript player configuration.
++    # Avoid a second full HTML parser pass in the download hot path. The page
++    # parser above already found ordinary attributes; this lightweight source
++    # pass recovers FlashVars/legacy player config. Dedicated media discovery
++    # still performs the exhaustive parser pass later.
+     if config.media.enabled and config.media.discover_embedded:
+-        embed_urls = {candidate.url for candidate in extract_embed_candidates(raw, original)}
++        embed_urls = {candidate.url for candidate in extract_embed_candidates_fast(raw, original)}
+         if embed_urls:
+             links = sorted(set(links).union(embed_urls))
+     prepared_fields, prepared_normalized_fields = prepare_analysis_fields(original, title, visible, raw, links)
+@@ -234,7 +234,7 @@ def fetch_parse_scan(row: sqlite3.Row, config: ProjectConfig, jobs: list[ScanJob
+         "links": links,
+         "analyses": analyses,
+         "content_hash": hash_text(raw),
+-        "normalized_hash": hash_text(normalize_search(visible)),
++        "normalized_hash": hash_text(prepared_normalized_fields["body"]),
+         "bytes_saved": len(data),
+         "http_status": response["status"],
+         "final_url": response["final_url"],
+diff --git a/archive_scout/operations.py b/archive_scout/operations.py
+index 9e84d71..7a3b6f4 100644
+--- a/archive_scout/operations.py
++++ b/archive_scout/operations.py
+@@ -26,7 +26,7 @@ from .projects.diagnostics import export_diagnostics
+ from .projects.importers import import_text_folder
+ from .constants import VERSION
+ from .projects.merge import merge_projects
+-from .reports.text import generate_reports
++from .reports.text import generate_index_reports, generate_reports
+ from .research.index import build_research_index
+ from .scanning.jobs import ScanJob
+ from .scanning.rescanner import rescan_keyword_sets
+@@ -229,14 +229,20 @@ def run_project(
+             return {"merge_summary": merge_report}
+         if mode == "index":
+             index_archive(config, database, stop_event, callback)
++            paths = generate_index_reports(config, database)
++            paths["project"] = config.output_dir / "project.json"
+             finish_operation_run(database, operation_run_id, "complete", "Index complete")
+             database.commit()
+-            return {"project": config.output_dir / "project.json"}
++            return paths
+         if mode == "report":
+             existing = latest_scan_run(database)
+             if existing is None:
+-                raise RuntimeError("this project does not contain a completed scan run")
+-            paths = generate_reports(config, database, existing)
++                if database.execute("SELECT COUNT(*) FROM captures").fetchone()[0]:
++                    paths = generate_index_reports(config, database)
++                else:
++                    raise RuntimeError("this project does not contain indexed captures or a completed scan run")
++            else:
++                paths = generate_reports(config, database, existing)
+             emit(callback, ProgressEvent("report", f"Reports written to {config.output_dir / 'reports'}"))
+             finish_operation_run(database, operation_run_id, "complete", "Reports regenerated")
+             database.commit()
+diff --git a/archive_scout/parsing/embeds.py b/archive_scout/parsing/embeds.py
+index 6ff37fd..6d11cdc 100644
+--- a/archive_scout/parsing/embeds.py
++++ b/archive_scout/parsing/embeds.py
+@@ -18,6 +18,12 @@ SCRIPT_MEDIA_PATTERN = re.compile(
+     r'''(?ix)(?:file|url|src|movie|media|playlist|clip)\s*[:=]\s*["']([^"']+\.(?:swf|flv|wmv|asf|asx|mov|mp4|mpe?g|avi|rm|ram|rpm|smil|m3u8?|pls|mp3|wav)(?:[?#][^"']*)?)["']'''
+ )
+ FLASHVARS_URL_PATTERN = re.compile(r"(?i)(?:^|[&;])(?:file|url|movie|video|stream)=([^&;]+)")
++PARAM_VALUE_PATTERN = re.compile(
++    r"(?is)<param\b[^>]*\bname\s*=\s*[\"'](?:movie|file|filename|url|src|media|clip)[\"'][^>]*\bvalue\s*=\s*[\"']([^\"']+)[\"']"
++)
++FLASHVARS_ATTR_PATTERN = re.compile(
++    r"(?is)(?:flashvars|name\s*=\s*[\"']flashvars[\"'][^>]*value)\s*=\s*[\"']([^\"']+)[\"']"
++)
+ LEGACY_EXTENSIONS = MEDIA_EXTENSIONS | AUDIO_EXTENSIONS | {
+     ".asx", ".m3u", ".m3u8", ".pls", ".ram", ".rpm", ".smil", ".swf",
+ }
+@@ -99,6 +105,44 @@ class _EmbedParser(HTMLParser):
+             self.object_stack.pop()
+ 
+ 
++def extract_embed_candidates_fast(raw: str, base_url: str = "") -> list[EmbedCandidate]:
++    """Recover legacy/config media URLs without performing a second HTML parse.
++
++    Normal text downloads already parse the page for href/src/data/poster links.
++    This source-only pass fills the historical gaps (player config, param values,
++    FlashVars) cheaply. The dedicated media-discovery operation still uses the
++    exhaustive parser below.
++    """
++    candidates: list[EmbedCandidate] = []
++
++    def add(value: str, context: str) -> None:
++        value = html.unescape(value).strip()
++        if not value or value.casefold().startswith(("javascript:", "data:", "mailto:")):
++            return
++        resolved = normalize_link(value, base_url)
++        if not resolved:
++            return
++        asset_type, player = classify_embed(resolved)
++        candidates.append(EmbedCandidate(resolved, asset_type, player, context))
++
++    for pattern, label in (
++        (EMBED_URL_PATTERN, "attribute/config"),
++        (SCRIPT_MEDIA_PATTERN, "script config"),
++        (PARAM_VALUE_PATTERN, "param value"),
++    ):
++        for match in pattern.finditer(raw):
++            add(match.group(1), label)
++    for match in FLASHVARS_ATTR_PATTERN.finditer(raw):
++        value = html.unescape(match.group(1))
++        for nested in FLASHVARS_URL_PATTERN.finditer(value):
++            add(urllib.parse.unquote_plus(nested.group(1)), "flashvars")
++
++    unique: dict[tuple[str, str], EmbedCandidate] = {}
++    for candidate in candidates:
++        unique.setdefault((candidate.url, candidate.asset_type), candidate)
++    return sorted(unique.values(), key=lambda item: (item.url, item.asset_type))
++
++
+ def extract_embed_candidates(raw: str, base_url: str = "") -> list[EmbedCandidate]:
+     parser = _EmbedParser(base_url)
+     try:
+diff --git a/archive_scout/reports/text.py b/archive_scout/reports/text.py
+index e536ec6..604d083 100644
+--- a/archive_scout/reports/text.py
++++ b/archive_scout/reports/text.py
+@@ -61,6 +61,98 @@ def _copy_latest(run_path: Path, latest_path: Path) -> None:
+         shutil.copyfile(run_path, latest_path)
+ 
+ 
++
++def generate_index_reports(config: ProjectConfig, database: sqlite3.Connection) -> dict[str, Path]:
++    """Write useful reports for a CDX-only project that has no scan_run row."""
++    root_reports = config.output_dir / "reports"
++    root_reports.mkdir(parents=True, exist_ok=True)
++    paths: dict[str, Path] = {}
++
++    indexed_path = root_reports / "all_indexed_urls.txt"
++    atomic_write_lines(
++        indexed_path,
++        (
++            f"{row['timestamp']}\t{row['mimetype'] or ''}\t{row['state']}\t{row['original_url']}"
++            for row in database.execute(
++                "SELECT timestamp,mimetype,state,original_url FROM captures ORDER BY original_url,timestamp"
++            )
++        ),
++    )
++    paths["all_indexed_urls"] = indexed_path
++
++    capture_count = int(database.execute("SELECT COUNT(*) FROM captures").fetchone()[0])
++    state_counts = {
++        str(row[0]): int(row[1])
++        for row in database.execute("SELECT state,COUNT(*) FROM captures GROUP BY state")
++    }
++    issue_count = int(database.execute("SELECT COUNT(*) FROM site_issues WHERE resolved=0").fetchone()[0])
++    error_count = int(database.execute("SELECT COUNT(*) FROM errors WHERE resolved=0").fetchone()[0])
++    summary_path = root_reports / "summary.txt"
++    atomic_write_lines(
++        summary_path,
++        [
++            "Archive Scout",
++            f"Generated: {utc_now()}",
++            "Operation: Index URLs only",
++            f"Targets: {', '.join(config.targets) or '(none)'}",
++            f"Date range: {config.from_date}-{config.to_date}",
++            f"Indexed captures: {capture_count:,}",
++            f"Unresolved errors: {error_count:,}",
++            f"Open site-specific issues: {issue_count:,}",
++            "States: " + ", ".join(f"{key}={value:,}" for key, value in sorted(state_counts.items())),
++        ],
++    )
++    paths["summary"] = summary_path
++
++    error_path = root_reports / "errors.txt"
++    atomic_write_lines(
++        error_path,
++        (
++            "\t".join([
++                str(row["last_seen"] or ""),
++                f"operation={row['operation']}",
++                f"category={row['category']}",
++                f"attempts={row['attempt_count']}",
++                f"retryable={bool(row['retryable'])}",
++                f"status={row['http_status'] or ''}",
++                str(row["timestamp"] or ""),
++                str(row["original_url"] or row["path"] or ""),
++                str(row["message"] or ""),
++            ])
++            for row in database.execute(
++                """SELECT e.*,c.timestamp,c.original_url,d.path
++                   FROM errors e
++                   LEFT JOIN captures c ON c.id=e.capture_id
++                   LEFT JOIN documents d ON d.id=e.document_id
++                   WHERE e.resolved=0
++                   ORDER BY e.operation,e.category,e.last_seen,e.id"""
++            )
++        ),
++    )
++    paths["errors"] = error_path
++
++    issues_path = root_reports / "site_issues.txt"
++    atomic_write_lines(
++        issues_path,
++        (
++            "\t".join([
++                str(row["last_seen"] or ""),
++                str(row["host"] or ""),
++                f"stage={row['stage']}",
++                f"category={row['category']}",
++                f"status={int(row['http_status'] or 0) or ''}",
++                f"occurrences={int(row['occurrence_count'] or 0)}",
++                str(row["message"] or ""),
++            ])
++            for row in database.execute(
++                """SELECT host,stage,category,http_status,occurrence_count,last_seen,message
++                   FROM site_issues WHERE resolved=0 ORDER BY last_seen DESC,id DESC"""
++            )
++        ),
++    )
++    paths["site_issues"] = issues_path
++    return paths
++
+ def generate_reports(
+     config: ProjectConfig,
+     database: sqlite3.Connection,
+diff --git a/archive_scout/scanning/automaton.py b/archive_scout/scanning/automaton.py
+index 5c52b81..b34057c 100644
+--- a/archive_scout/scanning/automaton.py
++++ b/archive_scout/scanning/automaton.py
+@@ -4,6 +4,11 @@ from collections import deque
+ from dataclasses import dataclass, field
+ from typing import Iterable
+ 
++try:
++    import ahocorasick_rs
++except Exception:  # pragma: no cover - source checkouts can run without optional wheel
++    ahocorasick_rs = None
++
+ 
+ @dataclass(slots=True)
+ class _Node:
+@@ -21,12 +26,19 @@ class LiteralAutomaton:
+     replaces an increasingly expensive giant alternation regex.
+     """
+ 
+-    __slots__ = ("_nodes", "patterns")
++    __slots__ = ("_nodes", "_native", "patterns")
+ 
+     def __init__(self, patterns: Iterable[str]) -> None:
+         unique = tuple(dict.fromkeys(value for value in patterns if value))
+         self.patterns = unique
++        self._native = None
++        if unique and ahocorasick_rs is not None:
++            # Rust-backed matching releases the GIL for strings, allowing the
++            # download/scanning worker pool to keep multiple pages moving.
++            self._native = ahocorasick_rs.AhoCorasick(unique, store_patterns=True)
+         self._nodes: list[_Node] = [_Node()]
++        if self._native is not None:
++            return
+         for pattern in unique:
+             state = 0
+             for character in pattern:
+@@ -65,6 +77,8 @@ class LiteralAutomaton:
+     def search_any(self, text: str) -> bool:
+         if not text or not self.patterns:
+             return False
++        if self._native is not None:
++            return bool(self._native.find_matches_as_indexes(text))
+         state = 0
+         nodes = self._nodes
+         for character in text:
+@@ -79,6 +93,10 @@ class LiteralAutomaton:
+         """Add matches to an existing set without allocating one set per field."""
+         if not text or not self.patterns:
+             return
++        if self._native is not None:
++            for pattern_index, _start, _end in self._native.find_matches_as_indexes(text, overlapping=True):
++                matches.add(self.patterns[pattern_index])
++            return
+         state = 0
+         nodes = self._nodes
+         for character in text:
+diff --git a/archive_scout/scanning/keywords.py b/archive_scout/scanning/keywords.py
+index cd10e85..f41f8e1 100644
+--- a/archive_scout/scanning/keywords.py
++++ b/archive_scout/scanning/keywords.py
+@@ -190,6 +190,47 @@ class KeywordPrefilter:
+                     return True
+         return False
+ 
++
++    def candidate_rules_with_positive_match(
++        self,
++        fields: dict[str, str],
++        normalized_fields: dict[str, str],
++    ) -> tuple[bool, list[CompiledRule]]:
++        """Discover literal candidates once and report whether a positive rule matched.
++
++        v1.0.3 first walked normalized fields with the positive automaton and then
++        walked them again with the all-literal automaton. The v1.0.4 hot path uses
++        one all-literal traversal and derives both answers from that result.
++        """
++        selected: list[CompiledRule] = []
++        seen: set[int] = set()
++        positive_found = not self.has_positive_rules
++        if self.candidate_automaton is not None:
++            expressions: set[str] = set()
++            for value in normalized_fields.values():
++                self.candidate_automaton.find_into(value, expressions)
++            for expression in expressions:
++                for item in self.literal_rules.get(expression, ()):
++                    marker = id(item)
++                    if marker not in seen:
++                        seen.add(marker)
++                        selected.append(item)
++                    if item.rule.kind != "excluded":
++                        positive_found = True
++        for item in self.slow_patterns:
++            marker = id(item)
++            if marker not in seen:
++                seen.add(marker)
++                selected.append(item)
++            if positive_found or item.rule.kind == "excluded":
++                continue
++            for field_name, value in fields.items():
++                haystack = value if item.rule.case_sensitive else normalized_fields[field_name]
++                if item.pattern.search(haystack):
++                    positive_found = True
++                    break
++        return positive_found, selected
++
+     def candidate_rules(
+         self,
+         fields: dict[str, str],
+diff --git a/archive_scout/scanning/scoring.py b/archive_scout/scanning/scoring.py
+index 6d7fb09..74bd756 100644
+--- a/archive_scout/scanning/scoring.py
++++ b/archive_scout/scanning/scoring.py
+@@ -138,31 +138,29 @@ def analyze_content(
+     else:
+         fields = prepared_fields
+         normalized_fields = prepared_normalized_fields
+-    if prefilter is not None and not prefilter.matches(fields, normalized_fields):
+-        return {
+-            "score": 0,
+-            "hits": {},
+-            "hit_fields": {},
+-            "snippets": [],
+-            "interesting_links": [],
+-            "excluded": False,
+-            "excluded_labels": [],
+-            "required_missing": any(item.rule.kind == "required" for item in patterns),
+-            "missing_required_labels": sorted({item.rule.label for item in patterns if item.rule.kind == "required"}),
+-            "proximity": {
+-                "window_words": 25,
+-                "pairs": 0,
+-                "minimum_distance": None,
+-                "sentence_bonus": 0,
+-                "paragraph_bonus": 0,
+-                "score_bonus": 0,
+-            },
+-        }
+-    evaluation_patterns = (
+-        prefilter.candidate_rules(fields, normalized_fields)
+-        if prefilter is not None
+-        else patterns
+-    )
++    evaluation_patterns = patterns
++    if prefilter is not None:
++        positive_match, evaluation_patterns = prefilter.candidate_rules_with_positive_match(fields, normalized_fields)
++        if not positive_match:
++            return {
++                "score": 0,
++                "hits": {},
++                "hit_fields": {},
++                "snippets": [],
++                "interesting_links": [],
++                "excluded": False,
++                "excluded_labels": [],
++                "required_missing": any(item.rule.kind == "required" for item in patterns),
++                "missing_required_labels": sorted({item.rule.label for item in patterns if item.rule.kind == "required"}),
++                "proximity": {
++                    "window_words": 25,
++                    "pairs": 0,
++                    "minimum_distance": None,
++                    "sentence_bonus": 0,
++                    "paragraph_bonus": 0,
++                    "score_bonus": 0,
++                },
++            }
+     multipliers = {"url": 6.0, "title": 5.0, "body": 1.0, "source": 0.75, "links": 2.5}
+     hits: Counter[str] = Counter()
+     hit_fields: dict[str, set[str]] = {}
+diff --git a/archive_scout/ui/main_window.py b/archive_scout/ui/main_window.py
+index 80dcf25..4380ec2 100644
+--- a/archive_scout/ui/main_window.py
++++ b/archive_scout/ui/main_window.py
+@@ -173,7 +173,6 @@ class ArchiveScoutApp(tk.Tk):
+ 
+     def create_variables(self) -> None:
+         default_output = Path.home() / "Downloads" / "ArchiveScout"
+-        cpu_count = os.cpu_count() or 4
+         self.output_var = tk.StringVar(value=str(default_output))
+         self.preset_var = tk.StringVar(value="Ogrish 9/11 research")
+         self.mode_var = tk.StringVar(value="Index, download, scan, and report")
+@@ -185,11 +184,11 @@ class ArchiveScoutApp(tk.Tk):
+         self.collapse_urlkey_var = tk.BooleanVar(value=True)
+         self.collapse_digest_var = tk.BooleanVar(value=False)
+         self.page_size_var = tk.StringVar(value="100000")
+-        self.workers_var = tk.StringVar(value=str(min(4, max(2, cpu_count))))
++        self.workers_var = tk.StringVar(value="10")
+         self.max_file_var = tk.StringVar(value="25")
+         self.minimum_score_var = tk.StringVar(value="1")
+         self.cdx_delay_var = tk.StringVar(value="0.75")
+-        self.download_delay_var = tk.StringVar(value="0.5")
++        self.download_delay_var = tk.StringVar(value="0.125")
+         self.rate_limit_base_var = tk.StringVar(value="30")
+         self.rate_limit_max_var = tk.StringVar(value="300")
+         self.rate_limit_wait_var = tk.StringVar(value="15")
+@@ -750,11 +749,11 @@ class ArchiveScoutApp(tk.Tk):
+ 
+         ttk.Label(tab, text="Performance", style="Section.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+         performance = [
+-            ("Download workers", self.workers_var),
++            ("Download workers (10 = fast default)", self.workers_var),
+             ("Maximum text-page size (MB)", self.max_file_var),
+             ("Minimum report score", self.minimum_score_var),
+             ("CDX request spacing (seconds)", self.cdx_delay_var),
+-            ("Download request spacing (seconds)", self.download_delay_var),
++            ("Download request spacing (0.125 = 8/sec)", self.download_delay_var),
+             ("429/503 initial shared pause (seconds)", self.rate_limit_base_var),
+             ("429/503 maximum shared pause (seconds)", self.rate_limit_max_var),
+         ]
+diff --git a/docs/AUTOMATION.md b/docs/AUTOMATION.md
+index 80a2fd7..e2319e7 100644
+--- a/docs/AUTOMATION.md
++++ b/docs/AUTOMATION.md
+@@ -1,6 +1,6 @@
+ # Archive Scout automation contract
+ 
+-Archive Scout 1.0.3 ships a separate console executable (`ArchiveScoutCLI`) alongside the desktop GUI. Source installs expose the same interface as `archive-scout`.
++Archive Scout 1.0.4 ships a separate console executable (`ArchiveScoutCLI`) alongside the desktop GUI. Source installs expose the same interface as `archive-scout`.
+ 
+ ## Commands
+ 
+diff --git a/docs/DEVELOPMENT.md b/docs/DEVELOPMENT.md
+index 50aeb3c..a208b94 100644
+--- a/docs/DEVELOPMENT.md
++++ b/docs/DEVELOPMENT.md
+@@ -1,6 +1,6 @@
+ # Development
+ 
+-Archive Scout supports Python 3.11 and newer. The official package version is 1.0.3.
++Archive Scout supports Python 3.11 and newer. The official package version is 1.0.4.
+ 
+ ## Principles
+ 
+diff --git a/docs/GITHUB_SETUP.md b/docs/GITHUB_SETUP.md
+index d829444..b67d5ce 100644
+--- a/docs/GITHUB_SETUP.md
++++ b/docs/GITHUB_SETUP.md
+@@ -18,4 +18,4 @@ Platform outputs:
+ 
+ Tagged Windows releases require the configured Artifact Signing variables/secrets. A manual build may create an unsigned Windows test package when signing is disabled; that package is not intended to substitute for an official signed tagged release.
+ 
+-For the first official release, create tag `v1.0.3` only after the complete test matrix and native package smoke tests succeed on the exact release commit.
++For the first official release, create tag `v1.0.4` only after the complete test matrix and native package smoke tests succeed on the exact release commit.
+diff --git a/examples/ogrish_911.project.json b/examples/ogrish_911.project.json
+index 3227495..bb9b8d2 100644
+--- a/examples/ogrish_911.project.json
++++ b/examples/ogrish_911.project.json
+@@ -1,5 +1,5 @@
+ {
+-  "version": "1.0.3",
++  "version": "1.0.4",
+   "output_dir": "ArchiveScout-Ogrish-911",
+   "targets": [
+     "ogrishforum.com/*",
+diff --git a/examples/project.example.json b/examples/project.example.json
+index 07ae623..a19c482 100644
+--- a/examples/project.example.json
++++ b/examples/project.example.json
+@@ -1,5 +1,5 @@
+ {
+-  "version": "1.0.3",
++  "version": "1.0.4",
+   "output_dir": "./archive-scout-project",
+   "targets": ["example.com/*"],
+   "keywords": ["video", "archive"],
+diff --git a/github/workflows/tests.yml b/github/workflows/tests.yml
+index 08dd20d..e7abe2b 100644
+--- a/github/workflows/tests.yml
++++ b/github/workflows/tests.yml
+@@ -57,9 +57,10 @@ jobs:
+ 
+       - name: Verify imports and package metadata
+         run: >-
+-          python -c "import importlib.metadata, archive_scout, archive_scout.app, archive_scout.cli;
+-          assert importlib.metadata.version('archive-scout') == '1.0.3';
+-          print('Archive Scout import and metadata checks passed')"
++          python -c "import importlib.metadata, archive_scout, archive_scout.app, archive_scout.cli, ahocorasick_rs;
++          from selectolax.lexbor import LexborHTMLParser;
++          assert importlib.metadata.version('archive-scout') == '1.0.4';
++          print('Archive Scout native accelerator imports and metadata checks passed')"
+ 
+       - name: Run tests
+         run: python -m unittest discover -s tests -p "test_*.py" -v
+diff --git a/packaging/macos/README.md b/packaging/macos/README.md
+index 7b4b38c..e3d11c5 100644
+--- a/packaging/macos/README.md
++++ b/packaging/macos/README.md
+@@ -8,4 +8,4 @@ ArchiveScout-macOS-Universal.zip
+ 
+ The script uses `ditto` to preserve bundle metadata and symbolic links. It extracts the completed ZIP into a clean temporary directory and verifies `base_library.zip`, all bundle links, and the code signature before publishing the package.
+ 
+-Archive Scout 1.0.3 release ZIPs also contain `ArchiveScoutCLI`, a universal console executable for bot/automation workflows. Run `./ArchiveScoutCLI --help` from Terminal or another process runner; the GUI remains `Archive Scout.app`.
++Archive Scout 1.0.4 release ZIPs also contain `ArchiveScoutCLI`, a universal console executable for bot/automation workflows. Run `./ArchiveScoutCLI --help` from Terminal or another process runner; the GUI remains `Archive Scout.app`.
+diff --git a/packaging/windows/version_info.txt b/packaging/windows/version_info.txt
+index 9395cce..dd5be2f 100644
+--- a/packaging/windows/version_info.txt
++++ b/packaging/windows/version_info.txt
+@@ -16,12 +16,12 @@ VSVersionInfo(
+         [
+           StringStruct('CompanyName', 'Archive Scout contributors'),
+           StringStruct('FileDescription', 'Archive Scout public web archive research workspace'),
+-          StringStruct('FileVersion', '1.0.3'),
++          StringStruct('FileVersion', '1.0.4'),
+           StringStruct('InternalName', 'ArchiveScout'),
+           StringStruct('LegalCopyright', 'Copyright (c) Archive Scout contributors'),
+           StringStruct('OriginalFilename', 'ArchiveScout.exe'),
+           StringStruct('ProductName', 'Archive Scout'),
+-          StringStruct('ProductVersion', '1.0.3')
++          StringStruct('ProductVersion', '1.0.4')
+         ]
+       )
+     ]),
+diff --git a/pyproject.toml b/pyproject.toml
+index 27e1e54..76f5e7f 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
+ 
+ [project]
+ name = "archive-scout"
+-version = "1.0.3"
++version = "1.0.4"
+ description = "A resilient cross-platform desktop workspace for indexing, downloading, reviewing, reconstructing, and analyzing public Wayback Machine captures"
+ readme = "README.md"
+ requires-python = ">=3.11"
+ license = {text = "MIT"}
+ authors = [{name = "Archive Scout contributors"}]
+-dependencies = ["truststore>=0.10,<1", "urllib3>=2.2,<3", "httpx>=0.28,<1", "python-dotenv>=1.2,<2"]
++dependencies = ["truststore>=0.10,<1", "urllib3>=2.2,<3", "httpx>=0.28,<1", "python-dotenv>=1.2,<2", "ahocorasick-rs>=1.0.3,<2", "selectolax>=0.4.8,<1"]
+ classifiers = [
+   "Development Status :: 5 - Production/Stable",
+   "Environment :: Win32 (MS Windows)",
+diff --git a/requirements-runtime.txt b/requirements-runtime.txt
+index 06eab4a..8ac0817 100644
+--- a/requirements-runtime.txt
++++ b/requirements-runtime.txt
+@@ -2,3 +2,5 @@ truststore>=0.10,<1
+ urllib3>=2.2,<3
+ httpx>=0.28,<1
+ python-dotenv>=1.2,<2
++ahocorasick-rs>=1.0.3,<2
++selectolax>=0.4.8,<1
+diff --git a/scripts/build_linux.sh b/scripts/build_linux.sh
+index 1a2ddd5..205cc58 100644
+--- a/scripts/build_linux.sh
++++ b/scripts/build_linux.sh
+@@ -2,8 +2,8 @@
+ set -euo pipefail
+ cd "$(dirname "$0")/.."
+ rm -rf build dist release
+-python -m PyInstaller --noconfirm --clean --windowed --onedir --name ArchiveScout --icon assets/archivescout.png --add-data "assets/archivescout.png:assets" --collect-all truststore --collect-all urllib3 --collect-all httpx --collect-all httpcore --collect-all dotenv run_app.py
+-python -m PyInstaller --noconfirm --clean --console --onedir --name ArchiveScoutCLI --collect-all truststore --collect-all urllib3 --collect-all httpx --collect-all httpcore --collect-all dotenv run_cli.py
++python -m PyInstaller --noconfirm --clean --windowed --onedir --name ArchiveScout --icon assets/archivescout.png --add-data "assets/archivescout.png:assets" --collect-all truststore --collect-all urllib3 --collect-all httpx --collect-all httpcore --collect-all dotenv --collect-all selectolax --collect-all ahocorasick_rs run_app.py
++python -m PyInstaller --noconfirm --clean --console --onedir --name ArchiveScoutCLI --collect-all truststore --collect-all urllib3 --collect-all httpx --collect-all httpcore --collect-all dotenv --collect-all selectolax --collect-all ahocorasick_rs run_cli.py
+ mkdir -p release/ArchiveScout-Linux-x64
+ cp -R dist/ArchiveScout release/ArchiveScout-Linux-x64/ArchiveScout
+ cp -R dist/ArchiveScoutCLI release/ArchiveScout-Linux-x64/ArchiveScoutCLI
+diff --git a/scripts/build_macos.sh b/scripts/build_macos.sh
+index e464c1a..a57cfa4 100644
+--- a/scripts/build_macos.sh
++++ b/scripts/build_macos.sh
+@@ -5,6 +5,40 @@ cd "$(dirname "$0")/.."
+ rm -rf build dist release
+ export MACOSX_DEPLOYMENT_TARGET="12.0"
+ 
++module_is_universal2() {
++  local module="$1"
++  local package_dir
++  package_dir="$(python - "$module" <<'PYMODULE'
++import importlib, pathlib, sys
++module = importlib.import_module(sys.argv[1])
++path = pathlib.Path(module.__file__).resolve()
++print(path if path.suffix in {".so", ".dylib"} else path.parent)
++PYMODULE
++)"
++  local found=0
++  local binary archs
++  while IFS= read -r binary; do
++    found=1
++    archs="$(lipo -archs "$binary" 2>/dev/null || true)"
++    [[ "$archs" == *"x86_64"* && "$archs" == *"arm64"* ]] || return 1
++  done < <(find "$package_dir" -type f \( -name '*.so' -o -name '*.dylib' \) -print 2>/dev/null)
++  [[ "$found" -eq 1 ]]
++}
++
++SELECTOLAX_FLAGS=(--exclude-module selectolax)
++if module_is_universal2 selectolax; then
++  SELECTOLAX_FLAGS=(--collect-all selectolax)
++else
++  echo "selectolax wheel is not universal2; packaged macOS app will use the built-in HTMLParser fallback."
++fi
++
++AHO_FLAGS=(--exclude-module ahocorasick_rs)
++if module_is_universal2 ahocorasick_rs; then
++  AHO_FLAGS=(--collect-all ahocorasick_rs)
++else
++  echo "ahocorasick-rs wheel is not universal2; packaged macOS app will use the built-in Aho-Corasick fallback."
++fi
++
+ python -m PyInstaller \
+   --noconfirm --clean --windowed \
+   --name "Archive Scout" \
+@@ -12,6 +46,7 @@ python -m PyInstaller \
+   --add-data "assets/archivescout.png:assets" \
+   --target-arch universal2 \
+   --collect-all truststore --collect-all urllib3 --collect-all httpx --collect-all httpcore --collect-all dotenv \
++  "${SELECTOLAX_FLAGS[@]}" "${AHO_FLAGS[@]}" \
+   run_app.py
+ 
+ python -m PyInstaller \
+@@ -19,6 +54,7 @@ python -m PyInstaller \
+   --name "ArchiveScoutCLI" \
+   --target-arch universal2 \
+   --collect-all truststore --collect-all urllib3 --collect-all httpx --collect-all httpcore --collect-all dotenv \
++  "${SELECTOLAX_FLAGS[@]}" "${AHO_FLAGS[@]}" \
+   run_cli.py
+ 
+ APP="dist/Archive Scout.app"
+diff --git a/scripts/build_windows.ps1 b/scripts/build_windows.ps1
+index ebc8b44..0069937 100644
+--- a/scripts/build_windows.ps1
++++ b/scripts/build_windows.ps1
+@@ -31,6 +31,8 @@ if (-not $SkipBuild) {
+         --collect-all httpx `
+         --collect-all httpcore `
+         --collect-all dotenv `
++        --collect-all selectolax `
++        --collect-all ahocorasick_rs `
+         run_app.py
+     python -m PyInstaller `
+         --noconfirm `
+@@ -45,6 +47,8 @@ if (-not $SkipBuild) {
+         --collect-all httpx `
+         --collect-all httpcore `
+         --collect-all dotenv `
++        --collect-all selectolax `
++        --collect-all ahocorasick_rs `
+         run_cli.py
+ }
+ 
+diff --git a/tests/unit/test_cli_automation.py b/tests/unit/test_cli_automation.py
+index dc5748b..6e7d5e2 100644
+--- a/tests/unit/test_cli_automation.py
++++ b/tests/unit/test_cli_automation.py
+@@ -40,7 +40,7 @@ class CLIAutomationTests(unittest.TestCase):
+             self.assertEqual(code, EXIT_OK)
+             status = json.loads(stdout.getvalue())
+             self.assertTrue(status['database'])
+-            self.assertEqual(status['version'], '1.0.3')
++            self.assertEqual(status['version'], '1.0.4')
+             self.assertEqual(stderr.getvalue(), '')
+ 
+     def test_readonly_commands_do_not_write_project_database(self):
+diff --git a/tests/unit/test_network_tuning.py b/tests/unit/test_network_tuning.py
+index a41ee36..7d9a36d 100644
+--- a/tests/unit/test_network_tuning.py
++++ b/tests/unit/test_network_tuning.py
+@@ -17,6 +17,8 @@ class NetworkTuningTests(unittest.TestCase):
+         self.assertEqual(config.cdx_delay, 0.75)
+         self.assertEqual(config.network.page_blocks, 0)
+         self.assertEqual(config.network.cdx_workers, 10)
++        self.assertEqual(config.workers, 10)
++        self.assertEqual(config.download_delay, 0.125)
+ 
+     def test_paged_and_resume_requests_use_larger_batches(self):
+         config = ProjectConfig(
+@@ -58,6 +60,40 @@ class NetworkTuningTests(unittest.TestCase):
+         self.assertTrue(client.assert_prefer_text)
+         self.assertGreaterEqual(client.max_bytes, 100000 * 1536)
+ 
++    def test_v103_untouched_download_defaults_upgrade_to_fast_replay_profile(self):
++        with tempfile.TemporaryDirectory() as temp:
++            path = Path(temp) / "project.json"
++            path.write_text(json.dumps({
++                "version": "1.0.3",
++                "output_dir": temp,
++                "targets": ["example.com/*"],
++                "keywords": [],
++                "from_date": "2001",
++                "to_date": "2001",
++                "workers": 4,
++                "download_delay": 0.5,
++            }), encoding="utf-8")
++            config = load_project_config(path)
++            self.assertEqual(config.workers, 10)
++            self.assertEqual(config.download_delay, 0.125)
++
++    def test_custom_download_profile_is_preserved(self):
++        with tempfile.TemporaryDirectory() as temp:
++            path = Path(temp) / "project.json"
++            path.write_text(json.dumps({
++                "version": "1.0.3",
++                "output_dir": temp,
++                "targets": ["example.com/*"],
++                "keywords": [],
++                "from_date": "2001",
++                "to_date": "2001",
++                "workers": 7,
++                "download_delay": 0.2,
++            }), encoding="utf-8")
++            config = load_project_config(path)
++            self.assertEqual(config.workers, 7)
++            self.assertEqual(config.download_delay, 0.2)
++
+     def test_earlier_untouched_defaults_upgrade(self):
+         with tempfile.TemporaryDirectory() as temp:
+             path = Path(temp) / "project.json"
+diff --git a/tests/unit/test_startup.py b/tests/unit/test_startup.py
+index 9389b9d..82d17e3 100644
+--- a/tests/unit/test_startup.py
++++ b/tests/unit/test_startup.py
+@@ -11,7 +11,7 @@ class StartupRegressionTests(unittest.TestCase):
+         self.assertIs(main_window.CoalescingEventQueue, CoalescingEventQueue)
+ 
+     def test_public_version_is_official_release(self):
+-        self.assertEqual(main_window.VERSION, "1.0.3")
++        self.assertEqual(main_window.VERSION, "1.0.4")
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/tests/unit/test_v104_release.py b/tests/unit/test_v104_release.py
+new file mode 100644
+index 0000000..ad1a951
+--- /dev/null
++++ b/tests/unit/test_v104_release.py
+@@ -0,0 +1,112 @@
++from __future__ import annotations
++
++import tempfile
++import threading
++import unittest
++from pathlib import Path
++from unittest.mock import patch
++
++from archive_scout.config import ProjectConfig
++from archive_scout.constants import TEXT_EXTENSIONS
++import archive_scout.content as content_module
++import archive_scout.scanning.automaton as automaton_module
++from archive_scout.content import is_text_candidate, parse_page
++from archive_scout.database.repositories import get_or_create_target, upsert_captures
++from archive_scout.operations import run_project
++from archive_scout.parsing.embeds import extract_embed_candidates_fast
++from archive_scout.scanning.automaton import LiteralAutomaton
++from archive_scout.scanning.jobs import ScanJob
++from archive_scout.scanning.scoring import analyze_content, prepare_analysis_fields
++
++
++class V104ReleaseTests(unittest.TestCase):
++    def test_requested_legacy_text_extensions_are_scannable(self):
++        requested = {".htm", ".shtm", ".dhtm", ".xhtm", ".phtm", ".cgi", ".php", ".dat", ".txt"}
++        self.assertTrue(requested.issubset(TEXT_EXTENSIONS))
++        for extension in requested:
++            with self.subTest(extension=extension):
++                self.assertTrue(is_text_candidate(f"http://example.com/page{extension}", "application/octet-stream"))
++
++    @unittest.skipUnless(automaton_module.ahocorasick_rs is not None, "native ahocorasick-rs wheel is not installed")
++    def test_native_aho_backend_is_exercised_when_installed(self):
++        matcher = LiteralAutomaton(["alpha", "beta"])
++        self.assertIsNotNone(matcher._native)
++        found: set[str] = set()
++        matcher.find_into("xx alpha beta yy", found)
++        self.assertEqual(found, {"alpha", "beta"})
++
++    @unittest.skipUnless(content_module.LexborHTMLParser is not None, "native selectolax wheel is not installed")
++    def test_native_lexbor_backend_is_exercised_when_installed(self):
++        with patch("archive_scout.content.PageParser", side_effect=AssertionError("Python fallback should not run")):
++            title, visible, links = parse_page(
++                "<html><head><title>Native</title></head><body>Hello <a href='/x'>world</a></body></html>",
++                "http://example.com/root/page.htm",
++            )
++        self.assertEqual(title, "Native")
++        self.assertIn("Hello", visible)
++        self.assertIn("http://example.com/x", links)
++
++    def test_parse_page_preserves_title_text_and_links(self):
++        raw = "<html><head><title>Old Site</title><style>x{}</style></head><body>Hello <a href='/clip.dat'>world</a><script>secret</script></body></html>"
++        title, visible, links = parse_page(raw, "http://example.com/root/page.htm")
++        self.assertEqual(title, "Old Site")
++        self.assertIn("Hello", visible)
++        self.assertIn("world", visible)
++        self.assertNotIn("secret", visible)
++        self.assertIn("http://example.com/clip.dat", links)
++
++    def test_fast_legacy_embed_recovery_avoids_full_parser_dependency(self):
++        raw = '<param name="flashvars" value="file=http%3A%2F%2Fcdn.example.com%2Fold.wmv&autoplay=1">'
++        urls = {item.url for item in extract_embed_candidates_fast(raw, "http://example.com/page.htm")}
++        self.assertIn("http://cdn.example.com/old.wmv", urls)
++
++    def test_prefilter_one_pass_keeps_scoring_semantics(self):
++        job = ScanJob.create(1, "set", ["alpha", "required: beta", "exclude: poison"])
++        raw = "<html><title>Alpha Beta</title><body>alpha beta text</body></html>"
++        title, visible, links = parse_page(raw, "http://example.com/a.htm")
++        fields, normalized = prepare_analysis_fields("http://example.com/a.htm", title, visible, raw, links)
++        result = analyze_content(
++            "http://example.com/a.htm", title, visible, raw, links,
++            job.patterns, job.prefilter, fields, normalized,
++        )
++        self.assertGreater(result["score"], 0)
++        self.assertFalse(result["required_missing"])
++        self.assertFalse(result["excluded"])
++
++    def test_index_only_operation_generates_reports_without_scan_run(self):
++        with tempfile.TemporaryDirectory() as temp:
++            root = Path(temp)
++            config = ProjectConfig(
++                output_dir=root,
++                targets=["example.com/*"],
++                keywords=[],
++                from_date="2005",
++                to_date="2005",
++            )
++
++            def fake_index(_config, database, _stop, _callback=None):
++                target_id = get_or_create_target(database, "example.com/*")
++                upsert_captures(database, [{
++                    "original": "http://example.com/page.shtm",
++                    "timestamp": "20050102030405",
++                    "mimetype": "text/html",
++                    "statuscode": "200",
++                    "digest": "ABC",
++                    "length": "123",
++                }], target_id, "sig")
++                database.commit()
++
++            with patch("archive_scout.operations.index_archive", side_effect=fake_index):
++                paths = run_project(config, "index", threading.Event())
++
++            self.assertTrue(paths["all_indexed_urls"].is_file())
++            self.assertTrue(paths["summary"].is_file())
++            self.assertIn("http://example.com/page.shtm", paths["all_indexed_urls"].read_text(encoding="utf-8"))
++            self.assertIn("Indexed captures: 1", paths["summary"].read_text(encoding="utf-8"))
++
++            regenerated = run_project(config, "report", threading.Event())
++            self.assertTrue(regenerated["all_indexed_urls"].is_file())
++
++
++if __name__ == "__main__":
++    unittest.main()

@@ -1,5 +1,5 @@
 {
-  "version": "1.0.3",
+  "version": "1.0.4",
   "output_dir": "ArchiveScout-Ogrish-911",
   "targets": [
     "ogrishforum.com/*",

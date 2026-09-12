@@ -1,66 +1,58 @@
-Archive Scout 1.0.3 source validation
-Date: 2026-08-26
+Archive Scout 1.0.4 source validation
+Date: 2026-09-11
 
 Release scope
-- Final performance-focused release built on the complete 1.0.2 feature set and interface.
-- Indexing: automatic broad/direct-media CDX traversal is resume-key-first, uses 100,000-row batches by default, preserves explicit paged compatibility mode, and converts unfinished 1.0.2 numbered queues without deleting already indexed captures.
-- Acquisition resilience: large resume windows retain adaptive subdivision, saved queue state, shared Wayback pacing, finite pause budgets, and coordinated 429/503 recovery.
-- Media: faster persistent external-embed discovery, exact-CDX resolution, URL-policy caching, fewer parser passes, batched database work, and the same row-scaled resume strategy as normal indexing.
-- Scanning/analysis: lower-allocation keyword candidate selection, faster proximity scoring, batched analysis persistence, optimized first-appearance search, and no-op reuse of unchanged work.
-- Research Intelligence: bulk metadata/relationship retrieval, SQL-side stale cleanup, incremental graph rebuilds, and fewer project-sized Python allocations.
-- Database/reporting: faster compact CDX ingestion, index-assisted error lookup, additional safe indexes, throttled operation-progress persistence, and cheaper latest-report publication where hardlinks are supported.
-- Existing AI relevance, bot/CLI automation, deterministic scoring, human review, reports, external media, project safety, and schema-v7 compatibility are preserved.
+- High-throughput replay release built on the complete v1.0.3 resume-key indexing architecture and schema version 7.
+- Replay acquisition: new projects use 10 workers with 0.125-second shared request-start spacing (up to eight starts/second) while retaining bounded in-flight work, persistent HTTP pools, saved resume state, retries, and coordinated Wayback 429/503 host gating.
+- Existing projects using the legacy untouched 4-worker / 0.5-second replay defaults migrate to the new fast defaults; deliberately customized worker/delay pairs remain unchanged.
+- Parsing/scanning: native ahocorasick-rs and selectolax/Lexbor paths are declared for packaged/source installs, with the established Python implementations retained as runtime fallbacks.
+- Hot-path work: literal candidate discovery and positive-match detection share one traversal, the already-normalized body is reused for normalized document hashing, and normal text downloads avoid a second full legacy-embed HTML-parser pass.
+- Text coverage: .htm, .shtm, .dhtm, .xhtm, .phtm, .cgi, .php, .dat, and .txt are explicitly scannable text-page formats.
+- Index-only reporting: Index URLs only now writes all_indexed_urls.txt, summary.txt, errors.txt, and site_issues.txt immediately; report regeneration also works for indexed projects with no scan run.
+- Existing AI relevance, Research Intelligence, external-media workflows, deterministic scoring, review state, bot/CLI automation, project safety, and schema-v7 compatibility are preserved.
 
 Automated validation
-- 178 automated tests completed successfully.
-- 1 display-dependent theme test was skipped because no graphical display is available in this environment.
-- All existing database migration tests passed; database schema remains version 7 and no migration is required from 1.0.2.
+- 187 automated tests ran: 184 passed and 3 were skipped.
+- 3 tests were skipped in this environment: 1 display-dependent theme test and 2 native-accelerator execution tests because those wheels are not installed locally. The CI matrix installs the declared runtime dependencies and executes those native-path tests.
+- New v1.0.4 regression coverage verifies requested legacy text extensions, page parsing, fast legacy-embed recovery, one-pass prefilter scoring semantics, fast-default migration/custom-setting preservation, and index-only report generation/regeneration without a scan run.
+- All existing database migration tests passed; database schema remains version 7 and no migration is required from v1.0.3.
 - Python compilation completed for archive_scout, tests, scripts, run_app.py, and run_cli.py.
-- .github/workflows/tests.yml parsed successfully as YAML.
-- .github/workflows/build-and-release.yml parsed successfully as YAML.
 - scripts/build_linux.sh passed bash syntax validation.
-- scripts/build_macos.sh passed bash syntax validation.
+- scripts/build_macos.sh passed bash syntax validation. Its Universal2 packaging path architecture-checks native extension binaries and falls back instead of bundling a thin single-architecture accelerator.
 - git diff --check passed.
-- Python wheel packaging completed successfully as archive_scout-1.0.3-py3-none-any.whl using pip --no-build-isolation.
-- Public application/package version is 1.0.3.
+- Python wheel packaging completed successfully as archive_scout-1.0.4-py3-none-any.whl using pip --no-build-isolation.
+- Wheel SHA256: b463302061402590c0b0d634619bb158008847c46ff3c8ed66115b8887e59ba5.
+- Public application/package version is 1.0.4.
 - Database schema version is 7.
 
-Indexing validation
-- Automatic indexing selects resume-key traversal and does not depend on showNumPages/numbered-page enumeration.
-- Automatic resume requests include urlkey in the CDX field list for reliable continuation and request 100,000 rows by default.
-- Explicit paged strategy remains available for compatibility and diagnostics.
-- An unfinished normal numbered queue with thousands of saved pages converts to resume traversal while retaining its date window and already committed captures.
-- An unfinished direct-media numbered queue converts the same way.
-- Automatic media indexing no longer turns automatic page grouping into pageSize=1.
-- URLs containing spaces remain intact in line-oriented urlkey CDX responses and resume tokens are preserved.
-- Untouched 1.0.2 50,000-row network defaults upgrade to 100,000 rows; deliberately customized values remain customized.
-- Existing timeout subdivision, resume persistence, shared Wayback pacing, finite pause budgets, headerless 503 coordination, site-issue circuits, and interruption recovery remain covered by the full suite.
+Replay-performance validation
+- The default text/media replay request envelope is 10 workers with 0.125-second shared start spacing, matching an eight-starts/second high-throughput profile while preserving Archive Scout's process-wide host gate and recovery policy.
+- The HTTP pool size follows the worker count, allowing ten persistent connections to overlap Wayback latency without project-sized task creation.
+- Existing bounded-inflight scheduling remains max(workers, workers*2), so the faster request envelope does not create an unbounded memory queue.
+- The native Aho-Corasick path releases Python-side matching work from the pure-Python automaton hot loop when the packaged dependency is present; the Python automaton remains a behavioral fallback.
+- The native Lexbor path performs title, visible-text, and ordinary-link extraction from one DOM parse when selectolax is present; the Python HTMLParser remains a behavioral fallback.
+- Normal download processing no longer runs the exhaustive legacy embed HTML parser immediately after ordinary page parsing; a lightweight source pass recovers old FlashVars/player configuration and the dedicated media-discovery workflow retains exhaustive parsing.
 
-Performance-path validation
-- Compact CDX tuples and mapping-form CDX rows persist with identical repository semantics.
-- Repeated unchanged CDX rows remain no-op database writes.
-- Keyword scoring retains exact aggregate score semantics in regression coverage while using lower-allocation candidate/proximity paths.
-- External media discovery/retry, streamed media transfer, local rescan reuse, Research Intelligence, and analysis workflows remain covered by integration/unit tests.
+Index-only report validation
+- A synthetic index-only operation persisted a capture and immediately produced reports/all_indexed_urls.txt and reports/summary.txt.
+- The indexed URL appeared in all_indexed_urls.txt and the summary reported the correct indexed-capture count.
+- Regenerate reports subsequently succeeded on the same project without a scan_run row.
 
 Offline 100,000-row performance validation
-- 100,000 CDX rows parsed in 2.385 seconds.
-- Parse-and-upsert completed in 4.428 seconds.
-- Repeating the same 100,000-row index produced 0 unchanged-row database writes.
-- Parser peak traced memory: 23,847,090 bytes.
+- 100,000 CDX rows parsed in 2.274489 seconds.
+- Literal prefilter benchmark completed in 0.521402 seconds.
+- Literal scoring benchmark completed in 0.504734 seconds.
+- Parse-and-upsert completed in 3.879936 seconds.
+- Repeating the same 100,000-row index completed in 2.993555 seconds and produced 0 unchanged-row database writes.
+- Result browsing (500 rows) completed in 0.010575 seconds.
+- JSON export completed in 0.652593 seconds.
 - HTTP attempts: 0.
-- Duplicate work: 0.
-
-Offline 1,000,000-row parser validation
-- 1,000,000 CDX rows parsed in 24.096 seconds.
-- Parser peak traced memory: 24,047,096 bytes.
-- HTTP attempts: 0.
-- Duplicate work: 0.
 
 Release limitations / remaining gates
-- The offline benchmark is deterministic and does not claim a guaranteed live Internet Archive wall-clock speedup; Wayback server load and target shape remain external variables.
+- Offline/source validation does not claim a guaranteed live Internet Archive completion rate; Wayback latency, throttling, capture size, and page complexity remain external variables. The v1.0.4 defaults match the standalone downloader's eight-request-starts/second envelope and can show higher short-window completion bursts when requests finish together.
 - A live Internet Archive large-site stress test was not performed in this validation environment.
+- The current validation container has no package-index network access, so the newly declared native accelerator wheels could not be installed and runtime-exercised here; the full source suite therefore exercised the retained Python fallback paths. The build/test workflow installs the runtime dependency set and must verify native imports/package smoke tests before the release tag is published.
 - Native Windows, macOS, and Linux distributable binaries were not produced in this container because PyInstaller is not installed here.
-- Build definitions were validated locally; GitHub Actions must produce and smoke-test the actual native GUI and ArchiveScoutCLI packages.
+- GitHub Actions must produce and smoke-test the actual native GUI and ArchiveScoutCLI packages on the release commit.
 - Real Windows signing, macOS signing/notarization, and release-upload transactions were not performed.
-- A live external AI-provider request was not performed because validation does not use user credentials.
-- Publish tag v1.0.3 only after the GitHub Actions matrix and native package smoke tests pass on the exact patched release commit.
+- Publish tag v1.0.4 only after the GitHub Actions matrix and native package smoke tests pass on the exact patched release commit.

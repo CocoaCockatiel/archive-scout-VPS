@@ -190,6 +190,47 @@ class KeywordPrefilter:
                     return True
         return False
 
+
+    def candidate_rules_with_positive_match(
+        self,
+        fields: dict[str, str],
+        normalized_fields: dict[str, str],
+    ) -> tuple[bool, list[CompiledRule]]:
+        """Discover literal candidates once and report whether a positive rule matched.
+
+        v1.0.3 first walked normalized fields with the positive automaton and then
+        walked them again with the all-literal automaton. The v1.0.4 hot path uses
+        one all-literal traversal and derives both answers from that result.
+        """
+        selected: list[CompiledRule] = []
+        seen: set[int] = set()
+        positive_found = not self.has_positive_rules
+        if self.candidate_automaton is not None:
+            expressions: set[str] = set()
+            for value in normalized_fields.values():
+                self.candidate_automaton.find_into(value, expressions)
+            for expression in expressions:
+                for item in self.literal_rules.get(expression, ()):
+                    marker = id(item)
+                    if marker not in seen:
+                        seen.add(marker)
+                        selected.append(item)
+                    if item.rule.kind != "excluded":
+                        positive_found = True
+        for item in self.slow_patterns:
+            marker = id(item)
+            if marker not in seen:
+                seen.add(marker)
+                selected.append(item)
+            if positive_found or item.rule.kind == "excluded":
+                continue
+            for field_name, value in fields.items():
+                haystack = value if item.rule.case_sensitive else normalized_fields[field_name]
+                if item.pattern.search(haystack):
+                    positive_found = True
+                    break
+        return positive_found, selected
+
     def candidate_rules(
         self,
         fields: dict[str, str],

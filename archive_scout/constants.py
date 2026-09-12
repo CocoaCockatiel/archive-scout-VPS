@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 SCHEMA_VERSION = 7
 APP_NAME = "Archive Scout"
 CDX_URL = "https://web.archive.org/cdx/search/cdx"
@@ -10,8 +10,9 @@ CDX_ENDPOINTS = (CDX_URL, CDX_TIMEMAP_URL, CDX_TIMEMAP_JSON_URL)
 REPLAY_URL = "https://web.archive.org/web"
 RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 TEXT_EXTENSIONS = {
-    ".asp", ".aspx", ".cfm", ".cgi", ".css", ".htm", ".html", ".inc",
-    ".js", ".json", ".jsp", ".php", ".shtml", ".text", ".txt", ".xhtml", ".xml"
+    ".asp", ".aspx", ".cfm", ".cgi", ".css", ".dat", ".dhtm", ".htm", ".html", ".inc",
+    ".js", ".json", ".jsp", ".phtm", ".php", ".shtm", ".shtml", ".text", ".txt",
+    ".xhtm", ".xhtml", ".xml"
 }
 IMAGE_EXTENSIONS = {
     ".avif", ".bmp", ".gif", ".heic", ".heif", ".ico", ".jfif", ".jpeg",

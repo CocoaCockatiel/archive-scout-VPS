@@ -61,6 +61,98 @@ def _copy_latest(run_path: Path, latest_path: Path) -> None:
         shutil.copyfile(run_path, latest_path)
 
 
+
+def generate_index_reports(config: ProjectConfig, database: sqlite3.Connection) -> dict[str, Path]:
+    """Write useful reports for a CDX-only project that has no scan_run row."""
+    root_reports = config.output_dir / "reports"
+    root_reports.mkdir(parents=True, exist_ok=True)
+    paths: dict[str, Path] = {}
+
+    indexed_path = root_reports / "all_indexed_urls.txt"
+    atomic_write_lines(
+        indexed_path,
+        (
+            f"{row['timestamp']}\t{row['mimetype'] or ''}\t{row['state']}\t{row['original_url']}"
+            for row in database.execute(
+                "SELECT timestamp,mimetype,state,original_url FROM captures ORDER BY original_url,timestamp"
+            )
+        ),
+    )
+    paths["all_indexed_urls"] = indexed_path
+
+    capture_count = int(database.execute("SELECT COUNT(*) FROM captures").fetchone()[0])
+    state_counts = {
+        str(row[0]): int(row[1])
+        for row in database.execute("SELECT state,COUNT(*) FROM captures GROUP BY state")
+    }
+    issue_count = int(database.execute("SELECT COUNT(*) FROM site_issues WHERE resolved=0").fetchone()[0])
+    error_count = int(database.execute("SELECT COUNT(*) FROM errors WHERE resolved=0").fetchone()[0])
+    summary_path = root_reports / "summary.txt"
+    atomic_write_lines(
+        summary_path,
+        [
+            "Archive Scout",
+            f"Generated: {utc_now()}",
+            "Operation: Index URLs only",
+            f"Targets: {', '.join(config.targets) or '(none)'}",
+            f"Date range: {config.from_date}-{config.to_date}",
+            f"Indexed captures: {capture_count:,}",
+            f"Unresolved errors: {error_count:,}",
+            f"Open site-specific issues: {issue_count:,}",
+            "States: " + ", ".join(f"{key}={value:,}" for key, value in sorted(state_counts.items())),
+        ],
+    )
+    paths["summary"] = summary_path
+
+    error_path = root_reports / "errors.txt"
+    atomic_write_lines(
+        error_path,
+        (
+            "\t".join([
+                str(row["last_seen"] or ""),
+                f"operation={row['operation']}",
+                f"category={row['category']}",
+                f"attempts={row['attempt_count']}",
+                f"retryable={bool(row['retryable'])}",
+                f"status={row['http_status'] or ''}",
+                str(row["timestamp"] or ""),
+                str(row["original_url"] or row["path"] or ""),
+                str(row["message"] or ""),
+            ])
+            for row in database.execute(
+                """SELECT e.*,c.timestamp,c.original_url,d.path
+                   FROM errors e
+                   LEFT JOIN captures c ON c.id=e.capture_id
+                   LEFT JOIN documents d ON d.id=e.document_id
+                   WHERE e.resolved=0
+                   ORDER BY e.operation,e.category,e.last_seen,e.id"""
+            )
+        ),
+    )
+    paths["errors"] = error_path
+
+    issues_path = root_reports / "site_issues.txt"
+    atomic_write_lines(
+        issues_path,
+        (
+            "\t".join([
+                str(row["last_seen"] or ""),
+                str(row["host"] or ""),
+                f"stage={row['stage']}",
+                f"category={row['category']}",
+                f"status={int(row['http_status'] or 0) or ''}",
+                f"occurrences={int(row['occurrence_count'] or 0)}",
+                str(row["message"] or ""),
+            ])
+            for row in database.execute(
+                """SELECT host,stage,category,http_status,occurrence_count,last_seen,message
+                   FROM site_issues WHERE resolved=0 ORDER BY last_seen DESC,id DESC"""
+            )
+        ),
+    )
+    paths["site_issues"] = issues_path
+    return paths
+
 def generate_reports(
     config: ProjectConfig,
     database: sqlite3.Connection,

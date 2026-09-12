@@ -31,6 +31,8 @@ if (-not $SkipBuild) {
         --collect-all httpx `
         --collect-all httpcore `
         --collect-all dotenv `
+        --collect-all selectolax `
+        --collect-all ahocorasick_rs `
         run_app.py
     python -m PyInstaller `
         --noconfirm `
@@ -45,6 +47,8 @@ if (-not $SkipBuild) {
         --collect-all httpx `
         --collect-all httpcore `
         --collect-all dotenv `
+        --collect-all selectolax `
+        --collect-all ahocorasick_rs `
         run_cli.py
 }
 

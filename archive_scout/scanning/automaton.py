@@ -4,6 +4,11 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Iterable
 
+try:
+    import ahocorasick_rs
+except Exception:  # pragma: no cover - source checkouts can run without optional wheel
+    ahocorasick_rs = None
+
 
 @dataclass(slots=True)
 class _Node:
@@ -21,12 +26,19 @@ class LiteralAutomaton:
     replaces an increasingly expensive giant alternation regex.
     """
 
-    __slots__ = ("_nodes", "patterns")
+    __slots__ = ("_nodes", "_native", "patterns")
 
     def __init__(self, patterns: Iterable[str]) -> None:
         unique = tuple(dict.fromkeys(value for value in patterns if value))
         self.patterns = unique
+        self._native = None
+        if unique and ahocorasick_rs is not None:
+            # Rust-backed matching releases the GIL for strings, allowing the
+            # download/scanning worker pool to keep multiple pages moving.
+            self._native = ahocorasick_rs.AhoCorasick(unique, store_patterns=True)
         self._nodes: list[_Node] = [_Node()]
+        if self._native is not None:
+            return
         for pattern in unique:
             state = 0
             for character in pattern:
@@ -65,6 +77,8 @@ class LiteralAutomaton:
     def search_any(self, text: str) -> bool:
         if not text or not self.patterns:
             return False
+        if self._native is not None:
+            return bool(self._native.find_matches_as_indexes(text))
         state = 0
         nodes = self._nodes
         for character in text:
@@ -78,6 +92,10 @@ class LiteralAutomaton:
     def find_into(self, text: str, matches: set[str]) -> None:
         """Add matches to an existing set without allocating one set per field."""
         if not text or not self.patterns:
+            return
+        if self._native is not None:
+            for pattern_index, _start, _end in self._native.find_matches_as_indexes(text, overlapping=True):
+                matches.add(self.patterns[pattern_index])
             return
         state = 0
         nodes = self._nodes
