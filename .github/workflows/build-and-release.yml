@@ -51,7 +51,7 @@ jobs:
       - name: Install build tools
         run: python -m pip install --upgrade pip && python -m pip install -r requirements-build.txt
       - name: Verify GUI, TLS, and HTTP pool support
-        run: python -c "import tkinter, truststore, urllib3, httpx; print('Windows x64 runtime ready')"
+        run: python -c "import tkinter, truststore, urllib3, httpx, ahocorasick_rs; from selectolax.lexbor import LexborHTMLParser; print('Windows x64 runtime + native accelerators ready')"
       - name: Require signing for tagged Windows releases
         if: startsWith(github.ref, 'refs/tags/') && vars.ENABLE_WINDOWS_ARTIFACT_SIGNING != 'true'
         shell: pwsh
@@ -134,7 +134,7 @@ jobs:
       - name: Install build tools
         run: python -m pip install --upgrade pip && python -m pip install -r requirements-build.txt
       - name: Verify GUI, TLS, and HTTP pool support
-        run: python -c "import tkinter, truststore, urllib3, httpx; print('Linux x64 runtime ready')"
+        run: python -c "import tkinter, truststore, urllib3, httpx, ahocorasick_rs; from selectolax.lexbor import LexborHTMLParser; print('Linux x64 runtime + native accelerators ready')"
       - name: Build Linux x64 package
         run: bash scripts/build_linux.sh
       - name: Verify Linux CLI executable
@@ -171,7 +171,7 @@ jobs:
         run: python -m pip install --upgrade pip && python -m pip install -r requirements-build.txt
       - name: Verify Universal2 Python, GUI, TLS, and HTTP pool support
         run: |
-          python -c "import tkinter, truststore, urllib3, httpx; print('macOS runtime ready')"
+          python -c "import tkinter, truststore, urllib3, httpx, ahocorasick_rs; from selectolax.lexbor import LexborHTMLParser; print('macOS build runtime + native accelerators ready')"
           PYTHON_BINARY="$(python -c 'import sys; print(sys.executable)')"
           echo "Python executable: $PYTHON_BINARY"
           lipo -archs "$PYTHON_BINARY"
