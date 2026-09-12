@@ -15,7 +15,7 @@ class NetworkTuningTests(unittest.TestCase):
         config = ProjectConfig(output_dir=Path("."), targets=["example.com/*"], keywords=[]).normalized()
         self.assertEqual(config.page_size, 100000)
         self.assertEqual(config.cdx_delay, 0.75)
-        self.assertEqual(config.network.page_blocks, 0)
+        self.assertEqual(config.network.page_blocks, 9)
         self.assertEqual(config.network.cdx_workers, 10)
         self.assertEqual(config.workers, 10)
         self.assertEqual(config.download_delay, 0.125)
@@ -30,7 +30,7 @@ class NetworkTuningTests(unittest.TestCase):
         ).normalized()
         paged = dict(build_paged_cdx_params(config, "example.com/*", "20010101000000", "20011231235959", 0))
         resume = dict(build_cdx_params(config, "example.com/*", "20010101000000", "20011231235959"))
-        self.assertNotIn("pageSize", paged)
+        self.assertEqual(paged["pageSize"], "9")
         self.assertEqual(resume["limit"], "100000")
 
 
@@ -110,7 +110,7 @@ class NetworkTuningTests(unittest.TestCase):
             }), encoding="utf-8")
             config = load_project_config(path)
             self.assertEqual(config.page_size, 100000)
-            self.assertEqual(config.network.page_blocks, 0)
+            self.assertEqual(config.network.page_blocks, 9)
             self.assertEqual(config.network.cdx_workers, 10)
             self.assertEqual(config.cdx_delay, 0.75)
 

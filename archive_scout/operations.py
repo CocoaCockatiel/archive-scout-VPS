@@ -119,7 +119,8 @@ def run_project(
     stop_event = stop_event or threading.Event()
     config.output_dir.mkdir(parents=True, exist_ok=True)
     (config.output_dir / "captures").mkdir(exist_ok=True)
-    (config.output_dir / "media").mkdir(exist_ok=True)
+    (config.output_dir / "media" / "images").mkdir(parents=True, exist_ok=True)
+    (config.output_dir / "media" / "videos").mkdir(parents=True, exist_ok=True)
     (config.output_dir / "reports").mkdir(exist_ok=True)
     database = open_database(config.output_dir, migrate=True)
     jobs: list[ScanJob] = []

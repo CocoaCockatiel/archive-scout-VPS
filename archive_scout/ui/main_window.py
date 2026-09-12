@@ -225,7 +225,7 @@ class ArchiveScoutApp(tk.Tk):
         self.media_external_var = tk.BooleanVar(value=False)
         self.media_strategy_var = tk.StringVar(value="earliest")
         self.media_max_var = tk.StringVar(value="500")
-        self.media_preserve_var = tk.BooleanVar(value=True)
+        self.media_preserve_var = tk.BooleanVar(value=False)
         self.result_scan_var = tk.StringVar()
         self.result_filter_var = tk.StringVar()
         self.result_review_filter_var = tk.StringVar(value="All")
@@ -672,7 +672,7 @@ class ArchiveScoutApp(tk.Tk):
         ttk.Combobox(settings, textvariable=self.media_strategy_var, values=("earliest", "latest", "all"), state="readonly", width=10).grid(row=0, column=1, padx=(5, 15))
         ttk.Label(settings, text="Maximum media size (MB):").grid(row=0, column=2)
         ttk.Entry(settings, textvariable=self.media_max_var, width=10).grid(row=0, column=3, padx=(5, 15))
-        ttk.Checkbutton(settings, text="Preserve original path structure", variable=self.media_preserve_var).grid(row=0, column=4)
+        ttk.Label(settings, text="Media layout: media/images and media/videos (flat)").grid(row=0, column=4, sticky="w")
 
 
     def create_analysis_tab(self) -> None:
@@ -768,14 +768,14 @@ class ArchiveScoutApp(tk.Tk):
         network_rows = [
             ("Connection backend", self.network_backend_var, ("auto", "httpx", "urllib3", "curl")),
             ("CDX endpoint", self.network_endpoint_var, ("auto", "cdx", "timemap")),
-            ("Index strategy (auto = fast resume)", self.network_strategy_var, ("auto", "resume", "paged")),
+            ("Index strategy (auto = fast parallel)", self.network_strategy_var, ("auto", "paged", "resume")),
         ]
         for row, (label, variable, values) in enumerate(network_rows, start=1):
             ttk.Label(tab, text=label + ":").grid(row=row, column=2, sticky="w", pady=4)
             ttk.Combobox(tab, textvariable=variable, values=values, state="readonly", width=18).grid(row=row, column=3, sticky="w", padx=(10, 0), pady=4)
         numeric = [
             ("Parallel CDX requests", self.network_cdx_workers_var),
-            ("Numbered-paging blocks (paged only)", self.network_page_blocks_var),
+            ("Page blocks (custom paged mode only)", self.network_page_blocks_var),
             ("Retry base (seconds)", self.network_retry_base_var),
             ("Retry ceiling (seconds)", self.network_retry_max_var),
             ("Failures before graceful pause", self.network_failure_limit_var),
@@ -1235,7 +1235,7 @@ class ArchiveScoutApp(tk.Tk):
                 allow_external_embeds=self.media_external_var.get() or external_after_scan,
                 snapshot_strategy=self.media_strategy_var.get(),
                 max_file_mb=float(self.media_max_var.get()),
-                preserve_paths=self.media_preserve_var.get(),
+                preserve_paths=False,
             )
             analysis = AnalysisConfig(
                 forum_profile=self.forum_profile_var.get(),
@@ -2294,7 +2294,7 @@ class ArchiveScoutApp(tk.Tk):
         self.media_external_var.set(media.allow_external_embeds)
         self.media_strategy_var.set(media.snapshot_strategy)
         self.media_max_var.set(str(media.max_file_mb))
-        self.media_preserve_var.set(media.preserve_paths)
+        self.media_preserve_var.set(False)
         ai = config.ai.normalized()
         self.ai_provider_var.set(ai.provider)
         self.ai_model_var.set(ai.model)

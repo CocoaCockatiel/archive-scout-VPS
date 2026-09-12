@@ -23,12 +23,16 @@ from .parameters import (
     build_num_pages_params,
     build_paged_cdx_params,
     cdx_endpoints,
+    cdx_paged_endpoints,
     cdx_query_signature,
     cdx_query_signatures,
     cdx_year_window,
     parse_num_pages,
     preferred_index_strategy,
 )
+
+
+PAGED_PIPELINE_PAGES = 1000
 
 
 @dataclass(slots=True)
@@ -524,8 +528,14 @@ def _resolve_strategy(current: PendingWindow, config: ProjectConfig, target: str
         current.resume_key = None
     if not current.pagination_supported and current.strategy == "paged":
         current.strategy = "resume"
-    if current.page_blocks <= 0:
-        current.page_blocks = config.network.normalized().page_blocks
+    network = config.network.normalized()
+    if network.index_strategy == "auto" and current.strategy == "paged":
+        # Auto mode is the fixed reference-downloader profile.  Do not let a
+        # legacy/custom numbered-page block value silently turn the ten-worker
+        # Timemap pipeline back into large, low-concurrency page bodies.
+        current.page_blocks = 9
+    elif current.page_blocks <= 0:
+        current.page_blocks = network.page_blocks
 
 
 def cdx_response_budget(page_size: int) -> int:
@@ -563,14 +573,14 @@ def _request_paged_batch(
     stop_event: threading.Event,
     consume_success: Callable[[PageFetchResult], None] | None = None,
 ) -> PagedBatch:
-    endpoints = cdx_endpoints(config)
+    endpoints = cdx_paged_endpoints(config)
     network = config.network.normalized()
     if current.page_count < 0:
         count_payload = client.get_cdx_any(
             endpoints,
             build_num_pages_params(config, target, current.start, current.end, current.page_blocks),
             max_bytes=1024 * 1024,
-            prefer_text=True,
+            prefer_text=False,
         )
         current.page_count = parse_num_pages(count_payload)
         current.page = min(current.page, current.page_count)
@@ -579,7 +589,10 @@ def _request_paged_batch(
         return PagedBatch([], [], True)
 
     page_workers = effective_page_workers(network.cdx_workers, current.page_blocks)
-    pages, next_page = _select_page_batch(current, page_workers)
+    # Keep a long rolling queue behind the worker pool, just like the reference
+    # downloader's 1,000-page task chunks. A single slow Timemap page no longer
+    # creates a barrier that leaves the other nine workers idle.
+    pages, next_page = _select_page_batch(current, max(page_workers, PAGED_PIPELINE_PAGES))
     if not pages:
         return PagedBatch([], [], True)
     results: list[PageFetchResult] = []
@@ -594,6 +607,7 @@ def _request_paged_batch(
         # pageSize=9 transport. Keep a generous per-response safety ceiling while
         # concurrency is independently capped by effective_page_workers().
         max_bytes=(192 * 1024 * 1024 if current.page_blocks <= 0 else max(64 * 1024 * 1024, current.page_blocks * 12 * 1024 * 1024)),
+        prefer_text=False,
     ):
         if result.succeeded and consume_success is not None:
             consume_success(result)

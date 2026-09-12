@@ -11,6 +11,7 @@ from typing import Callable
 from ..database.connection import DATABASE_NAME
 from ..database.repositories import get_or_create_media_target, get_or_create_target
 from ..events import ProgressEvent, Stopped
+from ..media.downloader import media_path
 from ..utils import atomic_write_text, utc_now
 
 
@@ -179,8 +180,12 @@ def merge_projects(
                     target_id = media_target_map.get(int(row["target_id"])) if row["target_id"] is not None else None
                     source_document_id = document_map.get(int(row["source_document_id"])) if row["source_document_id"] is not None else None
                     source_path = _source_file(source_root, str(row["path"])) if row["path"] else None
-                    destination_path = _copy_file(source_path, destination_root, "media", fingerprint)
-                    media_file_missing = bool(row["path"]) and destination_path is None
+                    destination_path = media_path(destination_root, row) if source_path else None
+                    if source_path and source_path.exists() and source_path.is_file() and destination_path is not None:
+                        destination_path.parent.mkdir(parents=True, exist_ok=True)
+                        if not destination_path.exists():
+                            shutil.copy2(source_path, destination_path)
+                    media_file_missing = bool(row["path"]) and (destination_path is None or not destination_path.exists())
                     database.execute(
                         """
                         INSERT OR IGNORE INTO media_captures(

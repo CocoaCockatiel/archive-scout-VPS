@@ -46,7 +46,7 @@ class MediaConfig:
     allow_external_embeds: bool = False
     snapshot_strategy: str = "earliest"
     max_file_mb: float = 500.0
-    preserve_paths: bool = True
+    preserve_paths: bool = False
 
     def normalized(self) -> "MediaConfig":
         targets = list(dict.fromkeys(normalize_target(value) for value in self.targets if value.strip()))
@@ -68,7 +68,7 @@ class MediaConfig:
             allow_external_embeds=bool(self.allow_external_embeds),
             snapshot_strategy=strategy,
             max_file_mb=max(0.1, float(self.max_file_mb)),
-            preserve_paths=bool(self.preserve_paths),
+            preserve_paths=False,
         )
 
     @property
@@ -197,7 +197,7 @@ class NetworkConfig:
     trust_environment: bool = True
     endpoint_mode: str = "auto"
     index_strategy: str = "auto"
-    page_blocks: int = 0
+    page_blocks: int = 9
     cdx_workers: int = 10
     persistent_retries: bool = True
     retry_base_seconds: float = 5.0
@@ -482,6 +482,18 @@ def load_project_config(path: Path) -> ProjectConfig:
         and str(network_payload.get("index_strategy", "auto")).casefold() == "auto"
     ):
         loaded_page_size = 100000
+    # v1.0.5 makes automatic indexing follow the fast standalone downloader's
+    # Timemap pattern: page-count once, then keep ten page requests continuously
+    # in flight using the historical pageSize=9 grouping. Upgrade only the
+    # untouched v1.0.4 automatic indexing profile.
+    if (
+        loaded_page_size == 100000
+        and loaded_cdx_delay == 0.75
+        and loaded_page_blocks == 0
+        and loaded_cdx_workers == 10
+        and str(network_payload.get("index_strategy", "auto")).casefold() == "auto"
+    ):
+        loaded_page_blocks = 9
     # v1.0.3 shipped conservative replay defaults (4 workers, 0.5 s
     # between request starts). Upgrade only that untouched pair to the v1.0.4
     # high-throughput replay profile: ten persistent connections and eight
@@ -533,7 +545,7 @@ def load_project_config(path: Path) -> ProjectConfig:
             allow_external_embeds=bool(media_payload.get("allow_external_embeds", False)),
             snapshot_strategy=str(media_payload.get("snapshot_strategy", "earliest")),
             max_file_mb=float(media_payload.get("max_file_mb", 500.0)),
-            preserve_paths=bool(media_payload.get("preserve_paths", True)),
+            preserve_paths=False,
         ),
         analysis=AnalysisConfig(
             forum_profile=str(analysis_payload.get("forum_profile", "auto")),

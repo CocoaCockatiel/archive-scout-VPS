@@ -17,8 +17,8 @@ class V102IndexingTests(unittest.TestCase):
         page = dict(build_paged_cdx_params(config, 'example.com/*', '20000101000000', '20001231235959', 3))
         self.assertEqual(count['showNumPages'], 'true')
         self.assertEqual(page['page'], '3')
-        self.assertNotIn('pageSize', count)
-        self.assertNotIn('pageSize', page)
+        self.assertEqual(count['pageSize'], '9')
+        self.assertEqual(page['pageSize'], '9')
 
     def test_explicit_smaller_page_grouping_remains_supported(self):
         config = ProjectConfig(output_dir=Path('.'), targets=['example.com/*'], keywords=[]).normalized()
@@ -30,7 +30,7 @@ class V102IndexingTests(unittest.TestCase):
     def test_server_sized_pages_cap_concurrent_large_bodies(self):
         self.assertEqual(effective_page_workers(10, 0), 3)
         self.assertEqual(effective_page_workers(2, 0), 2)
-        self.assertEqual(effective_page_workers(10, 5), 9)
+        self.assertEqual(effective_page_workers(10, 5), 10)
 
     def test_v101_untouched_nine_block_default_upgrades_but_custom_value_does_not(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -41,7 +41,7 @@ class V102IndexingTests(unittest.TestCase):
             }
             default_path = root / 'default.json'
             default_path.write_text(json.dumps({**common, 'network': {'page_blocks': 9, 'cdx_workers': 10}}), encoding='utf-8')
-            self.assertEqual(load_project_config(default_path).network.page_blocks, 0)
+            self.assertEqual(load_project_config(default_path).network.page_blocks, 9)
             custom_path = root / 'custom.json'
             custom_path.write_text(json.dumps({**common, 'network': {'page_blocks': 7, 'cdx_workers': 10}}), encoding='utf-8')
             self.assertEqual(load_project_config(custom_path).network.page_blocks, 7)

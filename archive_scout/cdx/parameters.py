@@ -110,8 +110,22 @@ def cdx_endpoints(config: ProjectConfig) -> tuple[str, ...]:
     if mode == "cdx":
         return (CDX_URL,)
     if mode == "timemap":
-        return (CDX_TIMEMAP_URL, CDX_TIMEMAP_JSON_URL)
-    return (CDX_URL, CDX_TIMEMAP_URL, CDX_TIMEMAP_JSON_URL)
+        return (CDX_TIMEMAP_JSON_URL, CDX_TIMEMAP_URL)
+    # Resume-key traversal is a CDX operation. Keep CDX first here and use the
+    # Timemap-first endpoint order only for numbered-page acquisition below.
+    return (CDX_URL, CDX_TIMEMAP_JSON_URL, CDX_TIMEMAP_URL)
+
+
+def cdx_paged_endpoints(config: ProjectConfig) -> tuple[str, ...]:
+    from ..constants import CDX_URL, CDX_TIMEMAP_JSON_URL, CDX_TIMEMAP_URL
+    mode = config.network.normalized().endpoint_mode
+    if mode == "cdx":
+        return (CDX_URL,)
+    if mode == "timemap":
+        return (CDX_TIMEMAP_JSON_URL, CDX_TIMEMAP_URL)
+    # Match the fast reference downloader: Timemap JSON is the normal numbered
+    # page source, with CDX retained as a transparent recovery path.
+    return (CDX_TIMEMAP_JSON_URL, CDX_URL, CDX_TIMEMAP_URL)
 
 
 def is_broad_cdx_query(config: ProjectConfig, target: str) -> bool:
@@ -125,11 +139,11 @@ def preferred_index_strategy(config: ProjectConfig, target: str) -> str:
     strategy = config.network.normalized().index_strategy
     if strategy != "auto":
         return strategy
-    # Resume-key traversal scales by returned rows instead of by the archive's
-    # internal ZipNum page topology. A giant domain can expose thousands of
-    # numbered pages even when pageSize is large, so numbered paging is now an
-    # explicit compatibility/diagnostic strategy rather than the automatic one.
-    return "resume"
+    # v1.0.5 follows the fast downloader's acquisition model: ask Timemap for
+    # the page count once, then keep a bounded pool of numbered page requests
+    # continuously occupied. Resume-key traversal remains the automatic fallback
+    # when page counting/pagination is unavailable or one page stays pathological.
+    return "paged"
 
 
 def build_num_pages_params(
@@ -175,6 +189,13 @@ def parse_num_pages(payload: object) -> int:
     if isinstance(payload, str) and payload.strip().isdigit():
         return max(0, int(payload.strip()))
     if isinstance(payload, list):
+        # Timemap JSON's showNumPages response is normally a tiny two-row table
+        # and the reference downloader reads payload[1][0].  Accept that shape
+        # explicitly, while retaining the older scalar/nested compatibility.
+        if len(payload) >= 2 and isinstance(payload[1], list) and payload[1]:
+            value = payload[1][0]
+            if str(value).strip().isdigit():
+                return max(0, int(str(value).strip()))
         candidates = payload
         while isinstance(candidates, list) and len(candidates) == 1:
             candidates = candidates[0]
@@ -185,6 +206,6 @@ def parse_num_pages(payload: object) -> int:
     if isinstance(payload, dict):
         for key in ("pages", "numPages", "num_pages"):
             value = payload.get(key)
-            if str(value).isdigit():
-                return max(0, int(value))
+            if str(value).strip().isdigit():
+                return max(0, int(str(value).strip()))
     raise RuntimeError(f"unexpected CDX page-count response: {payload!r}")

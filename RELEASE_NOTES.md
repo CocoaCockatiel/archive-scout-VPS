@@ -1,3 +1,33 @@
+# Archive Scout 1.0.5
+
+Archive Scout 1.0.5 focuses on acquisition speed during the indexing phase and simplifies media storage. Automatic CDX indexing now mirrors the reference downloader's proven Timemap architecture while retaining Archive Scout's persistent queues, database safety, recovery circuits, and resume fallback.
+
+## Fast indexing
+
+- Auto indexing is now Timemap-first and numbered-page based.
+- The default grouping is `pageSize=9`, with ten concurrent CDX page workers and the existing 0.75-second shared CDX request spacing (about 80 request starts/minute).
+- Up to 1,000 numbered pages are queued behind the bounded ten-worker pool so completed workers immediately pick up new pages instead of waiting at a small batch barrier.
+- Page bodies are committed to SQLite as soon as each request finishes.
+- Resume-key traversal remains available explicitly and is still the automatic fallback when Timemap pagination is unavailable, a page repeatedly times out, or a window must be subdivided.
+- Direct-media CDX indexing uses the same Timemap-first rolling page pipeline.
+
+## Media layout and downloading
+
+- `media/` now contains only `images/` and `videos/` for new v1.0.5 output. No host or original-path subdirectories are created.
+- Media filenames are taken directly from the URL's final path component. Timestamp/id prefixes are removed and percent-escaped URL spelling is preserved.
+- Normal media replay uses Wayback's `if_` modifier; SWF uses `oe_`, matching the reference downloader.
+- Media downloads continue to prioritize known-small files, use persistent pooled connections, ten workers, 0.125-second request spacing (eight starts/second), direct-to-disk streaming, and coordinated 429/503 pauses. v1.0.5 guarantees at least five transient attempts for media fetching.
+- If the exact flat destination already exists, the file is hashed and reused without another network request, matching the reference downloader's preflight behavior.
+
+## Compatibility
+
+- Database schema remains version 7.
+- Existing project files remain compatible. Auto mode always uses the fixed reference profile `pageSize=9`, including saved queues from older projects; a custom page-block value is honored only when `Index strategy` is explicitly set to `paged`.
+- The fixed media layout ignores the older `preserve_paths` option while continuing to accept it in existing project JSON.
+- Public version: 1.0.5.
+
+---
+
 # Archive Scout 1.0.4
 
 Archive Scout 1.0.4 is the high-throughput replay release. It preserves schema version 7 and the v1.0.3 resume-key CDX architecture while bringing text replay throughput much closer to the fast standalone Wayback downloader profile.
@@ -71,7 +101,7 @@ Archive Scout 1.0.3 is the final performance-focused release. It keeps the 1.0.2
 
 ## Compatibility
 
-- Public version: 1.0.4.
+- Public version: 1.0.3.
 - Database schema remains version 7.
 - Existing 1.0.0–1.0.2 projects remain supported.
 - GUI, CLI/bot automation, AI providers, external embedded media, review/report workflows, project recovery, diagnostics, and Research Intelligence remain available.

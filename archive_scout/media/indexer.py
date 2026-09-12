@@ -16,6 +16,7 @@ from ..cdx.client import CDXRow, HttpClient, PermanentRequestError, RateLimitDef
 from ..cdx.indexer import (
     PendingWindow,
     PagedBatch,
+    PAGED_PIPELINE_PAGES,
     _select_page_batch,
     cdx_response_budget,
     decode_plan,
@@ -27,6 +28,7 @@ from ..cdx.indexer import (
 from ..cdx.parallel import PageFetchResult, effective_page_workers, iter_cdx_pages
 from ..cdx.parameters import (
     cdx_endpoints,
+    cdx_paged_endpoints,
     cdx_query_signature,
     cdx_query_signatures,
     cdx_target_value,
@@ -447,8 +449,13 @@ def _resolve_media_strategy(current: PendingWindow, config: ProjectConfig, targe
         current.resume_key = None
     if not current.pagination_supported and current.strategy == "paged":
         current.strategy = "resume"
-    if current.page_blocks <= 0:
-        current.page_blocks = config.network.normalized().page_blocks
+    network = config.network.normalized()
+    if network.index_strategy == "auto" and current.strategy == "paged":
+        # Direct-media auto indexing uses the same fixed fast Timemap profile as
+        # main URL indexing, regardless of an older saved custom block count.
+        current.page_blocks = 9
+    elif current.page_blocks <= 0:
+        current.page_blocks = network.page_blocks
 
 
 def _request_media_paged_batch(
@@ -460,14 +467,14 @@ def _request_media_paged_batch(
     stop_event: threading.Event,
     consume_success: Callable[[PageFetchResult], None] | None = None,
 ) -> PagedBatch:
-    endpoints = cdx_endpoints(config)
+    endpoints = cdx_paged_endpoints(config)
     network = config.network.normalized()
     if current.page_count < 0:
         payload = client.get_cdx_any(
             endpoints,
             build_media_num_pages_params(config, target, current.start, current.end, extensions, current.page_blocks),
             max_bytes=1024 * 1024,
-            prefer_text=True,
+            prefer_text=False,
         )
         current.page_count = parse_num_pages(payload)
         current.page = min(current.page, current.page_count)
@@ -476,7 +483,7 @@ def _request_media_paged_batch(
         return PagedBatch([], [], True)
 
     page_workers = effective_page_workers(network.cdx_workers, current.page_blocks)
-    pages, next_page = _select_page_batch(current, page_workers)
+    pages, next_page = _select_page_batch(current, max(page_workers, PAGED_PIPELINE_PAGES))
     if not pages:
         return PagedBatch([], [], True)
     results: list[PageFetchResult] = []
@@ -490,6 +497,7 @@ def _request_media_paged_batch(
         stop_event,
         workers=page_workers,
         max_bytes=(192 * 1024 * 1024 if current.page_blocks <= 0 else max(64 * 1024 * 1024, current.page_blocks * 12 * 1024 * 1024)),
+        prefer_text=False,
     ):
         if result.succeeded and consume_success is not None:
             consume_success(result)

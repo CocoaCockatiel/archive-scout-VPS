@@ -26,9 +26,10 @@ from .rate_limit import SharedFixedRateLimiter, shared_host_gate
 from .validation import classify_exception
 
 
-def replay_url(timestamp: str, original: str) -> str:
+def replay_url(timestamp: str, original: str, modifier: str = "id_") -> str:
     encoded = urllib.parse.quote(original, safe=":/?&=#%+;,[]@!$'()*")
-    return f"{REPLAY_URL}/{timestamp}id_/{encoded}"
+    clean_modifier = modifier if modifier in {"id_", "if_", "oe_"} else "id_"
+    return f"{REPLAY_URL}/{timestamp}{clean_modifier}/{encoded}"
 
 
 def capture_path(root: Path, capture_id: int, timestamp: str, original: str) -> Path:
