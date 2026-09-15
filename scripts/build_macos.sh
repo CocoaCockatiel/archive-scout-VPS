@@ -5,6 +5,40 @@ cd "$(dirname "$0")/.."
 rm -rf build dist release
 export MACOSX_DEPLOYMENT_TARGET="12.0"
 
+module_is_universal2() {
+  local module="$1"
+  local package_dir
+  package_dir="$(python - "$module" <<'PYMODULE'
+import importlib, pathlib, sys
+module = importlib.import_module(sys.argv[1])
+path = pathlib.Path(module.__file__).resolve()
+print(path if path.suffix in {".so", ".dylib"} else path.parent)
+PYMODULE
+)"
+  local found=0
+  local binary archs
+  while IFS= read -r binary; do
+    found=1
+    archs="$(lipo -archs "$binary" 2>/dev/null || true)"
+    [[ "$archs" == *"x86_64"* && "$archs" == *"arm64"* ]] || return 1
+  done < <(find "$package_dir" -type f \( -name '*.so' -o -name '*.dylib' \) -print 2>/dev/null)
+  [[ "$found" -eq 1 ]]
+}
+
+SELECTOLAX_FLAGS=(--exclude-module selectolax)
+if module_is_universal2 selectolax; then
+  SELECTOLAX_FLAGS=(--collect-all selectolax)
+else
+  echo "selectolax wheel is not universal2; packaged macOS app will use the built-in HTMLParser fallback."
+fi
+
+AHO_FLAGS=(--exclude-module ahocorasick_rs)
+if module_is_universal2 ahocorasick_rs; then
+  AHO_FLAGS=(--collect-all ahocorasick_rs)
+else
+  echo "ahocorasick-rs wheel is not universal2; packaged macOS app will use the built-in Aho-Corasick fallback."
+fi
+
 python -m PyInstaller \
   --noconfirm --clean --windowed \
   --name "Archive Scout" \
@@ -12,6 +46,7 @@ python -m PyInstaller \
   --add-data "assets/archivescout.png:assets" \
   --target-arch universal2 \
   --collect-all truststore --collect-all urllib3 --collect-all httpx --collect-all httpcore --collect-all dotenv \
+  "${SELECTOLAX_FLAGS[@]}" "${AHO_FLAGS[@]}" \
   run_app.py
 
 python -m PyInstaller \
@@ -19,6 +54,7 @@ python -m PyInstaller \
   --name "ArchiveScoutCLI" \
   --target-arch universal2 \
   --collect-all truststore --collect-all urllib3 --collect-all httpx --collect-all httpcore --collect-all dotenv \
+  "${SELECTOLAX_FLAGS[@]}" "${AHO_FLAGS[@]}" \
   run_cli.py
 
 APP="dist/Archive Scout.app"

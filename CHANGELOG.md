@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.5
+
+- Changed automatic CDX indexing to the fast Timemap numbered-page pipeline: fixed pageSize=9, ten concurrent page workers, Timemap JSON first, and a rolling queue of up to 1,000 pages. Auto mode forces the reference page grouping even when an older saved queue carried a different numbered-page block value.
+- Preserved resume-key traversal as the recovery path for unavailable pagination, repeated slow pages, and explicit resume mode.
+- Applied the same parallel Timemap acquisition logic to direct-media indexing.
+- Standardized media output to exactly two flat directories: `media/images/` and `media/videos/`.
+- Media files now use the original URL filename without timestamp, database-id, host, or path prefixes; raw percent-escaped URL spelling is preserved whenever portable filesystems allow it.
+- Media replay fetching now follows the reference downloader's `if_` behavior (`oe_` for SWF), keeps the ten-worker/eight-starts-per-second envelope, uses at least five transient retries, prioritizes known-small files, and skips network work when the exact destination already exists.
+- Project merge media copies now honor the same flat images/videos layout.
+
+## 1.0.4
+
+- Raised the default replay-download envelope to ten persistent workers with 0.125-second request-start spacing (up to eight starts/second), while retaining coordinated 429/503 host pauses, bounded in-flight work, retries, and resumability.
+- Added native `ahocorasick-rs` matching and `selectolax`/Lexbor HTML parsing to the hot scan path, with the existing Python implementations retained as safe fallbacks.
+- Removed a duplicate literal-prefilter traversal and reused the already-normalized body when computing document hashes.
+- Added legacy text-page extensions `.shtm`, `.dhtm`, `.xhtm`, `.phtm`, and `.dat`; existing `.htm`, `.cgi`, `.php`, and `.txt` support remains.
+- Fixed `Index URLs only` so it immediately writes `reports/all_indexed_urls.txt`, `summary.txt`, `errors.txt`, and `site_issues.txt`; report regeneration now also works for index-only projects without a scan run.
+
 ## 1.0.3
 
 - Replaced automatic numbered CDX paging with resume-key-first traversal for broad indexes, eliminating the thousands-of-pages failure mode on very large sites.

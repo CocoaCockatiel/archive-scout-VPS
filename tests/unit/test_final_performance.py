@@ -30,30 +30,35 @@ class FinalPerformanceTests(unittest.TestCase):
             from_date="2001",
             to_date="2001",
             cdx_delay=0,
-            network=NetworkConfig(index_strategy=strategy, page_blocks=0, cdx_workers=10),
+            network=NetworkConfig(index_strategy=strategy, cdx_workers=10),
         ).normalized()
 
-    def test_auto_indexing_uses_resume_key_traversal_not_numbered_pages(self):
+    def test_auto_indexing_uses_timemap_page_count_then_parallel_pages(self):
         with tempfile.TemporaryDirectory() as temp:
             config = self._config(Path(temp))
             database = open_database(config.output_dir)
-            calls: list[dict[str, str]] = []
+            calls: list[tuple[tuple[str, ...], dict[str, str], bool]] = []
 
-            def fake_get(_self, _urls, params, max_bytes=64 * 1024 * 1024, prefer_text=False):
-                del max_bytes, prefer_text
-                calls.append(dict(params))
+            def fake_get(_self, urls, params, max_bytes=64 * 1024 * 1024, prefer_text=False):
+                del max_bytes
+                values = dict(params)
+                calls.append((tuple(urls), values, prefer_text))
+                if values.get("showNumPages") == "true":
+                    return 1
                 return []
 
             with patch("archive_scout.cdx.client.HttpClient.get_cdx_any", new=fake_get):
                 index_archive(config, database, threading.Event())
             database.close()
 
-            self.assertEqual(len(calls), 1)
-            self.assertNotIn("showNumPages", calls[0])
-            self.assertNotIn("page", calls[0])
-            self.assertEqual(calls[0]["showResumeKey"], "true")
-            self.assertEqual(calls[0]["limit"], "100000")
-            self.assertTrue(calls[0]["fl"].startswith("urlkey,"))
+            self.assertEqual(len(calls), 2)
+            self.assertIn("/web/timemap/json", calls[0][0][0])
+            self.assertEqual(calls[0][1]["showNumPages"], "true")
+            self.assertEqual(calls[0][1]["pageSize"], "9")
+            self.assertFalse(calls[0][2])
+            self.assertEqual(calls[1][1]["page"], "0")
+            self.assertEqual(calls[1][1]["pageSize"], "9")
+            self.assertFalse(calls[1][2])
 
     def test_explicit_paged_strategy_remains_available(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -61,9 +66,9 @@ class FinalPerformanceTests(unittest.TestCase):
             self.assertEqual(preferred_index_strategy(config, "example.com/*"), "paged")
         with tempfile.TemporaryDirectory() as temp:
             config = self._config(Path(temp), strategy="auto")
-            self.assertEqual(preferred_index_strategy(config, "example.com/*"), "resume")
+            self.assertEqual(preferred_index_strategy(config, "example.com/*"), "paged")
 
-    def test_unfinished_numbered_queue_converts_to_resume_without_dropping_window(self):
+    def test_unfinished_numbered_queue_stays_parallel_in_auto_mode(self):
         with tempfile.TemporaryDirectory() as temp:
             config = self._config(Path(temp))
             window = PendingWindow(
@@ -78,12 +83,12 @@ class FinalPerformanceTests(unittest.TestCase):
                 resume_key="old-token",
             )
             _resolve_strategy(window, config, "example.com/*")
-            self.assertEqual(window.strategy, "resume")
-            self.assertEqual(window.page, 0)
-            self.assertEqual(window.page_count, -1)
-            self.assertEqual(window.retry_pages, [])
-            self.assertEqual(window.page_failures, {})
-            self.assertIsNone(window.resume_key)
+            self.assertEqual(window.strategy, "paged")
+            self.assertEqual(window.page, 712)
+            self.assertEqual(window.page_count, 8000)
+            self.assertEqual(window.retry_pages, [18, 711])
+            self.assertEqual(window.page_failures, {18: 2, 711: 1})
+            self.assertEqual(window.resume_key, "old-token")
             self.assertEqual(window.start, "20010101000000")
             self.assertEqual(window.end, "20011231235959")
 
@@ -92,16 +97,16 @@ class FinalPerformanceTests(unittest.TestCase):
             config = self._config(Path(temp), strategy="paged")
             extensions = ["jpg", "png", "mp4"]
             count = dict(build_media_num_pages_params(
-                config, "example.com/*", "20010101000000", "20011231235959", extensions, 0
+                config, "example.com/*", "20010101000000", "20011231235959", extensions, config.network.page_blocks
             ))
             page = dict(build_media_paged_params(
-                config, "example.com/*", "20010101000000", "20011231235959", extensions, 3, 0
+                config, "example.com/*", "20010101000000", "20011231235959", extensions, 3, config.network.page_blocks
             ))
-            self.assertNotIn("pageSize", count)
-            self.assertNotIn("pageSize", page)
+            self.assertEqual(count["pageSize"], "9")
+            self.assertEqual(page["pageSize"], "9")
             self.assertEqual(page["page"], "3")
 
-    def test_unfinished_media_numbered_queue_converts_to_resume(self):
+    def test_unfinished_media_numbered_queue_stays_parallel(self):
         with tempfile.TemporaryDirectory() as temp:
             config = self._config(Path(temp))
             window = PendingWindow(
@@ -115,12 +120,12 @@ class FinalPerformanceTests(unittest.TestCase):
                 page_failures={50: 2},
             )
             _resolve_media_strategy(window, config, "example.com/*")
-            self.assertEqual(window.strategy, "resume")
-            self.assertEqual(window.page_count, -1)
-            self.assertEqual(window.retry_pages, [])
-            self.assertEqual(window.page_failures, {})
+            self.assertEqual(window.strategy, "paged")
+            self.assertEqual(window.page_count, 12000)
+            self.assertEqual(window.retry_pages, [50])
+            self.assertEqual(window.page_failures, {50: 2})
 
-    def test_media_auto_indexing_uses_resume_not_page_count(self):
+    def test_media_auto_indexing_uses_timemap_parallel_page_pipeline(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             base = self._config(root)
@@ -128,11 +133,8 @@ class FinalPerformanceTests(unittest.TestCase):
                 **{
                     **{name: getattr(base, name) for name in base.__dataclass_fields__},
                     "media": MediaConfig(
-                        enabled=True,
-                        include_images=True,
-                        include_videos=False,
-                        include_extensions=["jpg", "png"],
-                        discover_embedded=False,
+                        enabled=True, include_images=True, include_videos=False,
+                        include_extensions=["jpg", "png"], discover_embedded=False,
                     ),
                 }
             ).normalized()
@@ -141,17 +143,20 @@ class FinalPerformanceTests(unittest.TestCase):
 
             def fake_get(_self, _urls, params, max_bytes=64 * 1024 * 1024, prefer_text=False):
                 del max_bytes, prefer_text
-                calls.append(dict(params))
+                values = dict(params)
+                calls.append(values)
+                if values.get("showNumPages") == "true":
+                    return 1
                 return []
 
             with patch("archive_scout.cdx.client.HttpClient.get_cdx_any", new=fake_get):
                 index_media(config, database, threading.Event())
             database.close()
-            self.assertEqual(len(calls), 1)
-            self.assertNotIn("showNumPages", calls[0])
-            self.assertEqual(calls[0]["showResumeKey"], "true")
-            self.assertEqual(calls[0]["limit"], "100000")
-            self.assertTrue(calls[0]["fl"].startswith("urlkey,"))
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0]["showNumPages"], "true")
+            self.assertEqual(calls[0]["pageSize"], "9")
+            self.assertEqual(calls[1]["page"], "0")
+            self.assertEqual(calls[1]["pageSize"], "9")
 
     def test_urlkey_text_rows_preserve_urls_with_spaces_and_resume_key(self):
         params = [("fl", "urlkey,timestamp,mimetype,statuscode,digest,length,original")]

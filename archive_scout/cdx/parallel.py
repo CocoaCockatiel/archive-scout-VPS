@@ -35,7 +35,11 @@ def effective_page_workers(requested_workers: int, page_blocks: int) -> int:
     blocks = int(page_blocks)
     if blocks <= 0:
         return min(requested, 3)
-    memory_cap = max(2, 48 // max(1, blocks))
+    if blocks <= 9:
+        # The reference downloader uses pageSize=9 with ten concurrent Timemap
+        # requests. Match that proven envelope while retaining the caller's cap.
+        return min(requested, 10)
+    memory_cap = max(2, 96 // max(1, blocks))
     return min(requested, memory_cap)
 
 
@@ -47,6 +51,7 @@ def iter_cdx_pages(
     stop_event: threading.Event,
     workers: int,
     max_bytes: int = 64 * 1024 * 1024,
+    prefer_text: bool = True,
 ) -> Iterator[PageFetchResult]:
     """Yield independent CDX pages as soon as each page completes.
 
@@ -69,7 +74,7 @@ def iter_cdx_pages(
                 endpoint_tuple,
                 params_for_page(page),
                 max_bytes=max_bytes,
-                prefer_text=True,
+                prefer_text=prefer_text,
             )
             return PageFetchResult(page, result.rows, time.monotonic() - started)
         except Stopped:
@@ -108,6 +113,7 @@ def fetch_cdx_pages(
     stop_event: threading.Event,
     workers: int,
     max_bytes: int = 64 * 1024 * 1024,
+    prefer_text: bool = True,
 ) -> list[PageFetchResult]:
     """Compatibility wrapper returning deterministic page order."""
     results = list(
@@ -119,6 +125,7 @@ def fetch_cdx_pages(
             stop_event,
             workers,
             max_bytes=max_bytes,
+            prefer_text=prefer_text,
         )
     )
     results.sort(key=lambda item: item.page)

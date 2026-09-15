@@ -20,13 +20,13 @@ crashes and normal VPS reboots.
 
 Archive Scout is a cross-platform desktop research workspace for indexing, downloading, searching, reviewing, reconstructing, and analyzing public captures from the Internet Archive's Wayback Machine.
 
-Archive Scout 1.0.3 is the final performance-focused release. It preserves the established project workflow and Research Intelligence/automation features while replacing the large-site CDX bottleneck with resume-key-first indexing and optimizing the major local, database, media, analysis, and research hot paths.
+Archive Scout 1.0.5 is the fast-indexing and flat-media release. Automatic indexing now follows the high-throughput Timemap pattern used by the reference downloader: page count once, pageSize=9, ten concurrent CDX page workers, and a rolling 1,000-page queue with resume-key fallback. Media downloads use the same ten-worker/eight-starts-per-second replay envelope, fetch with the reference if_/oe_ modifiers, and save directly under media/images or media/videos using the original URL filename.
 
 ## Downloads
 
-- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.3/ArchiveScout-Windows-x64.zip)
-- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.3/ArchiveScout-Linux-x64.zip)
-- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.3/ArchiveScout-macOS-Universal.zip)
+- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.5/ArchiveScout-Windows-x64.zip)
+- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.5/ArchiveScout-Linux-x64.zip)
+- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.5/ArchiveScout-macOS-Universal.zip)
 
 ## Core workflow
 
@@ -48,7 +48,7 @@ Archive Scout stores project state in SQLite so long jobs can be stopped and res
 
 ## Research Intelligence
 
-Archive Scout 1.0.3 treats a completed project as one evidence corpus. The local research index combines full-text evidence, compact vectors, extracted entities/identifiers, duplicate clusters, deterministic Archive Scout scores, hyperlinks, provenance relationships, reconstructed forum relationships, and capture timestamps.
+Archive Scout 1.0.5 treats a completed project as one evidence corpus. The local research index combines full-text evidence, compact vectors, extracted entities/identifiers, duplicate clusters, deterministic Archive Scout scores, hyperlinks, provenance relationships, reconstructed forum relationships, and capture timestamps.
 
 The **Research intelligence** tab can:
 
@@ -155,7 +155,7 @@ The execution engine is designed around bounded work rather than project-sized i
 - keyset pagination for large local tables;
 - bulk capture and queue writes;
 - resumable CDX pages and resume keys;
-- fixed shared request-start pacing with bounded overlap;
+- high-throughput text replay defaults (10 workers, 0.125-second shared request-start spacing) with bounded overlap;
 - endpoint/backend recovery and date-window subdivision for transient CDX failures;
 - bounded local parallel rescanning;
 - stored-parse reuse for unchanged documents;
@@ -167,11 +167,13 @@ The execution engine is designed around bounded work rather than project-sized i
 
 The offline benchmark runner can exercise large CDX parsing, database insertion, result pagination, keyword matching, and no-op repeated indexing without contacting the Internet Archive.
 
-### Resume-key-first indexing in 1.0.3
+Text-capture discovery explicitly recognizes legacy web/page formats including `.htm`, `.shtm`, `.dhtm`, `.xhtm`, `.phtm`, `.cgi`, `.php`, `.dat`, and `.txt` in addition to the existing HTML/XML/JSON/script formats.
 
-Automatic indexing no longer asks Wayback for a numbered page count. Large targets are traversed in resumable 100,000-row CDX batches using `showResumeKey=true`, so performance scales with returned rows instead of Wayback's internal ZipNum page topology. This removes the pathological `page 1 / thousands` workflow that could take days or weeks on very large sites.
+### Timemap-first parallel indexing in 1.0.5
 
-Unfinished numbered queues created by 1.0.2 are converted automatically when resumed. Captures already committed to SQLite are kept; replayed rows are handled by no-op upserts. If a large resume batch is too expensive for Wayback, Archive Scout subdivides the affected date window and keeps the rest of the saved queue intact. Explicit `paged` mode remains available only as a compatibility/diagnostic choice. Direct-media indexing follows the same strategy.
+Automatic indexing now asks Wayback Timemap for the numbered-page count once, uses `pageSize=9`, and keeps up to ten page requests active behind the shared 0.75-second CDX start limiter. Up to 1,000 pages are queued behind that bounded worker pool so one slow request does not create a small-batch barrier. Each completed page is committed immediately and its row buffer is released.
+
+Archive Scout still keeps the resume-key engine as the recovery path. If Timemap page counting is unavailable, a numbered page repeatedly stalls, or Wayback requires smaller work, completed rows stay in SQLite and the affected range converts to resumable windows instead of restarting the project. Explicit `resume` mode remains available. Direct-media indexing uses the same Timemap-first pipeline.
 
 ## Automation and bot compatibility
 

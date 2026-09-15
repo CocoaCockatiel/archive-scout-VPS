@@ -26,7 +26,7 @@ from .projects.diagnostics import export_diagnostics
 from .projects.importers import import_text_folder
 from .constants import VERSION
 from .projects.merge import merge_projects
-from .reports.text import generate_reports
+from .reports.text import generate_index_reports, generate_reports
 from .research.index import build_research_index
 from .scanning.jobs import ScanJob
 from .scanning.rescanner import rescan_keyword_sets
@@ -119,7 +119,8 @@ def run_project(
     stop_event = stop_event or threading.Event()
     config.output_dir.mkdir(parents=True, exist_ok=True)
     (config.output_dir / "captures").mkdir(exist_ok=True)
-    (config.output_dir / "media").mkdir(exist_ok=True)
+    (config.output_dir / "media" / "images").mkdir(parents=True, exist_ok=True)
+    (config.output_dir / "media" / "videos").mkdir(parents=True, exist_ok=True)
     (config.output_dir / "reports").mkdir(exist_ok=True)
     database = open_database(config.output_dir, migrate=True)
     jobs: list[ScanJob] = []
@@ -229,14 +230,20 @@ def run_project(
             return {"merge_summary": merge_report}
         if mode == "index":
             index_archive(config, database, stop_event, callback)
+            paths = generate_index_reports(config, database)
+            paths["project"] = config.output_dir / "project.json"
             finish_operation_run(database, operation_run_id, "complete", "Index complete")
             database.commit()
-            return {"project": config.output_dir / "project.json"}
+            return paths
         if mode == "report":
             existing = latest_scan_run(database)
             if existing is None:
-                raise RuntimeError("this project does not contain a completed scan run")
-            paths = generate_reports(config, database, existing)
+                if database.execute("SELECT COUNT(*) FROM captures").fetchone()[0]:
+                    paths = generate_index_reports(config, database)
+                else:
+                    raise RuntimeError("this project does not contain indexed captures or a completed scan run")
+            else:
+                paths = generate_reports(config, database, existing)
             emit(callback, ProgressEvent("report", f"Reports written to {config.output_dir / 'reports'}"))
             finish_operation_run(database, operation_run_id, "complete", "Reports regenerated")
             database.commit()

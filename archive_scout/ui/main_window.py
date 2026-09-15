@@ -173,7 +173,6 @@ class ArchiveScoutApp(tk.Tk):
 
     def create_variables(self) -> None:
         default_output = Path.home() / "Downloads" / "ArchiveScout"
-        cpu_count = os.cpu_count() or 4
         self.output_var = tk.StringVar(value=str(default_output))
         self.preset_var = tk.StringVar(value="Ogrish 9/11 research")
         self.mode_var = tk.StringVar(value="Index, download, scan, and report")
@@ -185,11 +184,11 @@ class ArchiveScoutApp(tk.Tk):
         self.collapse_urlkey_var = tk.BooleanVar(value=True)
         self.collapse_digest_var = tk.BooleanVar(value=False)
         self.page_size_var = tk.StringVar(value="100000")
-        self.workers_var = tk.StringVar(value=str(min(4, max(2, cpu_count))))
+        self.workers_var = tk.StringVar(value="10")
         self.max_file_var = tk.StringVar(value="25")
         self.minimum_score_var = tk.StringVar(value="1")
         self.cdx_delay_var = tk.StringVar(value="0.75")
-        self.download_delay_var = tk.StringVar(value="0.5")
+        self.download_delay_var = tk.StringVar(value="0.125")
         self.rate_limit_base_var = tk.StringVar(value="30")
         self.rate_limit_max_var = tk.StringVar(value="300")
         self.rate_limit_wait_var = tk.StringVar(value="15")
@@ -226,7 +225,7 @@ class ArchiveScoutApp(tk.Tk):
         self.media_external_var = tk.BooleanVar(value=False)
         self.media_strategy_var = tk.StringVar(value="earliest")
         self.media_max_var = tk.StringVar(value="500")
-        self.media_preserve_var = tk.BooleanVar(value=True)
+        self.media_preserve_var = tk.BooleanVar(value=False)
         self.result_scan_var = tk.StringVar()
         self.result_filter_var = tk.StringVar()
         self.result_review_filter_var = tk.StringVar(value="All")
@@ -673,7 +672,7 @@ class ArchiveScoutApp(tk.Tk):
         ttk.Combobox(settings, textvariable=self.media_strategy_var, values=("earliest", "latest", "all"), state="readonly", width=10).grid(row=0, column=1, padx=(5, 15))
         ttk.Label(settings, text="Maximum media size (MB):").grid(row=0, column=2)
         ttk.Entry(settings, textvariable=self.media_max_var, width=10).grid(row=0, column=3, padx=(5, 15))
-        ttk.Checkbutton(settings, text="Preserve original path structure", variable=self.media_preserve_var).grid(row=0, column=4)
+        ttk.Label(settings, text="Media layout: media/images and media/videos (flat)").grid(row=0, column=4, sticky="w")
 
 
     def create_analysis_tab(self) -> None:
@@ -750,11 +749,11 @@ class ArchiveScoutApp(tk.Tk):
 
         ttk.Label(tab, text="Performance", style="Section.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
         performance = [
-            ("Download workers", self.workers_var),
+            ("Download workers (10 = fast default)", self.workers_var),
             ("Maximum text-page size (MB)", self.max_file_var),
             ("Minimum report score", self.minimum_score_var),
             ("CDX request spacing (seconds)", self.cdx_delay_var),
-            ("Download request spacing (seconds)", self.download_delay_var),
+            ("Download request spacing (0.125 = 8/sec)", self.download_delay_var),
             ("429/503 initial shared pause (seconds)", self.rate_limit_base_var),
             ("429/503 maximum shared pause (seconds)", self.rate_limit_max_var),
         ]
@@ -769,14 +768,14 @@ class ArchiveScoutApp(tk.Tk):
         network_rows = [
             ("Connection backend", self.network_backend_var, ("auto", "httpx", "urllib3", "curl")),
             ("CDX endpoint", self.network_endpoint_var, ("auto", "cdx", "timemap")),
-            ("Index strategy (auto = fast resume)", self.network_strategy_var, ("auto", "resume", "paged")),
+            ("Index strategy (auto = fast parallel)", self.network_strategy_var, ("auto", "paged", "resume")),
         ]
         for row, (label, variable, values) in enumerate(network_rows, start=1):
             ttk.Label(tab, text=label + ":").grid(row=row, column=2, sticky="w", pady=4)
             ttk.Combobox(tab, textvariable=variable, values=values, state="readonly", width=18).grid(row=row, column=3, sticky="w", padx=(10, 0), pady=4)
         numeric = [
             ("Parallel CDX requests", self.network_cdx_workers_var),
-            ("Numbered-paging blocks (paged only)", self.network_page_blocks_var),
+            ("Page blocks (custom paged mode only)", self.network_page_blocks_var),
             ("Retry base (seconds)", self.network_retry_base_var),
             ("Retry ceiling (seconds)", self.network_retry_max_var),
             ("Failures before graceful pause", self.network_failure_limit_var),
@@ -1236,7 +1235,7 @@ class ArchiveScoutApp(tk.Tk):
                 allow_external_embeds=self.media_external_var.get() or external_after_scan,
                 snapshot_strategy=self.media_strategy_var.get(),
                 max_file_mb=float(self.media_max_var.get()),
-                preserve_paths=self.media_preserve_var.get(),
+                preserve_paths=False,
             )
             analysis = AnalysisConfig(
                 forum_profile=self.forum_profile_var.get(),
@@ -2295,7 +2294,7 @@ class ArchiveScoutApp(tk.Tk):
         self.media_external_var.set(media.allow_external_embeds)
         self.media_strategy_var.set(media.snapshot_strategy)
         self.media_max_var.set(str(media.max_file_mb))
-        self.media_preserve_var.set(media.preserve_paths)
+        self.media_preserve_var.set(False)
         ai = config.ai.normalized()
         self.ai_provider_var.set(ai.provider)
         self.ai_model_var.set(ai.model)

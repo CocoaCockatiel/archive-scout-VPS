@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import os
 import re
 import sqlite3
@@ -8,7 +9,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Callable
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 
 from ..cdx.client import HttpClient, RateLimitDeferred
 from ..config import ProjectConfig
@@ -25,28 +26,76 @@ from .indexer import media_query_signature
 INVALID_COMPONENT = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
-def safe_component(value: str, fallback: str = "unnamed") -> str:
-    value = INVALID_COMPONENT.sub("_", unquote(value)).strip(" .")
-    return value[:180] or fallback
+def _platform_filename(value: str, fallback: str) -> str:
+    """Preserve the URL filename verbatim whenever the filesystem permits it.
+
+    URL path segments are normally already percent-escaped, so the common case
+    needs no rewriting at all. Only characters that cannot be represented as one
+    portable filename are percent-escaped instead of being replaced with opaque
+    ids/timestamps.
+    """
+    value = (value or fallback).strip()
+    if not value:
+        value = fallback
+    out: list[str] = []
+    for char in value:
+        if INVALID_COMPONENT.fullmatch(char) or ord(char) < 32:
+            out.append(f"%{ord(char):02X}")
+        else:
+            out.append(char)
+    result = "".join(out).rstrip(" .")
+    return result or fallback
 
 
-def media_path(root: Path, row: sqlite3.Row, preserve_paths: bool) -> Path:
-    parsed = urlsplit(row["original_url"])
-    host = safe_component(parsed.hostname or "unknown-host")
-    filename = safe_component(Path(parsed.path).name or f"media{row['extension'] or ''}")
-    prefix = f"{row['timestamp']}_{row['id']}_"
-    if preserve_paths:
-        directories = [safe_component(part) for part in Path(parsed.path).parts[:-1] if part not in {"/", ""}]
-        return root / "media" / row["media_kind"] / host / Path(*directories) / (prefix + filename)
-    return root / "media" / row["media_kind"] / host / (prefix + filename)
+def media_filename(original_url: str, extension: str = "") -> str:
+    parsed = urlsplit(original_url)
+    # Keep the raw URL spelling (including percent escapes) rather than unquoting
+    # it, so photo%20one.jpg remains photo%20one.jpg on disk.
+    raw_name = (parsed.path or "").rsplit("/", 1)[-1]
+    fallback = "media" + (extension or "")
+    return _platform_filename(raw_name, fallback)
+
+
+def media_path(root: Path, row: sqlite3.Row, preserve_paths: bool = False) -> Path:
+    del preserve_paths  # v1.0.5 media layout is deliberately fixed and flat.
+    folder = "images" if str(row["media_kind"]).casefold() == "image" else "videos"
+    filename = media_filename(str(row["original_url"]), str(row["extension"] or ""))
+    return root / "media" / folder / filename
+
+
+def media_replay_url(row: sqlite3.Row) -> str:
+    modifier = "oe_" if str(row["extension"] or "").casefold() == ".swf" else "if_"
+    return replay_url(str(row["timestamp"]), str(row["original_url"]), modifier=modifier)
+
+
+def _hash_existing(path: Path) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            size += len(chunk)
+            digest.update(chunk)
+    return size, digest.hexdigest()
 
 
 def fetch_media(row: sqlite3.Row, config: ProjectConfig, client: HttpClient) -> dict:
-    path = media_path(config.output_dir, row, config.media.preserve_paths)
+    path = media_path(config.output_dir, row)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".part")
+    # Match the fast downloader's preflight: an exact destination that already
+    # exists is treated as downloaded and is not fetched again.
+    if path.is_file():
+        size, digest = _hash_existing(path)
+        return {
+            "id": int(row["id"]),
+            "path": path,
+            "bytes": size,
+            "hash": digest,
+            "status": 200,
+            "final_url": media_replay_url(row),
+        }
+    temp = path.with_name(path.name + ".part")
     response = client.download_to_path(
-        replay_url(row["timestamp"], row["original_url"]),
+        media_replay_url(row),
         temp,
         config.media.max_file_bytes,
     )
@@ -147,6 +196,9 @@ def download_media(
     if states:
         clauses.append("state IN (" + ",".join("?" for _ in states) + ")")
         params.extend(states)
+    media_root = config.output_dir / "media"
+    (media_root / "images").mkdir(parents=True, exist_ok=True)
+    (media_root / "videos").mkdir(parents=True, exist_ok=True)
     total, row_iter = iter_media_download_rows(database, clauses, params)
     if not total:
         if callback:
@@ -168,7 +220,7 @@ def download_media(
 
     client = HttpClient(
         limiter,
-        config.retries,
+        max(5, config.retries),
         max(config.connect_timeout, config.read_timeout),
         config.user_agent,
         stop_event,

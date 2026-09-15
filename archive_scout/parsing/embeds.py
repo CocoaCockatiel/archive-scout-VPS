@@ -18,6 +18,12 @@ SCRIPT_MEDIA_PATTERN = re.compile(
     r'''(?ix)(?:file|url|src|movie|media|playlist|clip)\s*[:=]\s*["']([^"']+\.(?:swf|flv|wmv|asf|asx|mov|mp4|mpe?g|avi|rm|ram|rpm|smil|m3u8?|pls|mp3|wav)(?:[?#][^"']*)?)["']'''
 )
 FLASHVARS_URL_PATTERN = re.compile(r"(?i)(?:^|[&;])(?:file|url|movie|video|stream)=([^&;]+)")
+PARAM_VALUE_PATTERN = re.compile(
+    r"(?is)<param\b[^>]*\bname\s*=\s*[\"'](?:movie|file|filename|url|src|media|clip)[\"'][^>]*\bvalue\s*=\s*[\"']([^\"']+)[\"']"
+)
+FLASHVARS_ATTR_PATTERN = re.compile(
+    r"(?is)(?:flashvars|name\s*=\s*[\"']flashvars[\"'][^>]*value)\s*=\s*[\"']([^\"']+)[\"']"
+)
 LEGACY_EXTENSIONS = MEDIA_EXTENSIONS | AUDIO_EXTENSIONS | {
     ".asx", ".m3u", ".m3u8", ".pls", ".ram", ".rpm", ".smil", ".swf",
 }
@@ -97,6 +103,44 @@ class _EmbedParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if tag.casefold() == "object" and self.object_stack:
             self.object_stack.pop()
+
+
+def extract_embed_candidates_fast(raw: str, base_url: str = "") -> list[EmbedCandidate]:
+    """Recover legacy/config media URLs without performing a second HTML parse.
+
+    Normal text downloads already parse the page for href/src/data/poster links.
+    This source-only pass fills the historical gaps (player config, param values,
+    FlashVars) cheaply. The dedicated media-discovery operation still uses the
+    exhaustive parser below.
+    """
+    candidates: list[EmbedCandidate] = []
+
+    def add(value: str, context: str) -> None:
+        value = html.unescape(value).strip()
+        if not value or value.casefold().startswith(("javascript:", "data:", "mailto:")):
+            return
+        resolved = normalize_link(value, base_url)
+        if not resolved:
+            return
+        asset_type, player = classify_embed(resolved)
+        candidates.append(EmbedCandidate(resolved, asset_type, player, context))
+
+    for pattern, label in (
+        (EMBED_URL_PATTERN, "attribute/config"),
+        (SCRIPT_MEDIA_PATTERN, "script config"),
+        (PARAM_VALUE_PATTERN, "param value"),
+    ):
+        for match in pattern.finditer(raw):
+            add(match.group(1), label)
+    for match in FLASHVARS_ATTR_PATTERN.finditer(raw):
+        value = html.unescape(match.group(1))
+        for nested in FLASHVARS_URL_PATTERN.finditer(value):
+            add(urllib.parse.unquote_plus(nested.group(1)), "flashvars")
+
+    unique: dict[tuple[str, str], EmbedCandidate] = {}
+    for candidate in candidates:
+        unique.setdefault((candidate.url, candidate.asset_type), candidate)
+    return sorted(unique.values(), key=lambda item: (item.url, item.asset_type))
 
 
 def extract_embed_candidates(raw: str, base_url: str = "") -> list[EmbedCandidate]:

@@ -138,31 +138,29 @@ def analyze_content(
     else:
         fields = prepared_fields
         normalized_fields = prepared_normalized_fields
-    if prefilter is not None and not prefilter.matches(fields, normalized_fields):
-        return {
-            "score": 0,
-            "hits": {},
-            "hit_fields": {},
-            "snippets": [],
-            "interesting_links": [],
-            "excluded": False,
-            "excluded_labels": [],
-            "required_missing": any(item.rule.kind == "required" for item in patterns),
-            "missing_required_labels": sorted({item.rule.label for item in patterns if item.rule.kind == "required"}),
-            "proximity": {
-                "window_words": 25,
-                "pairs": 0,
-                "minimum_distance": None,
-                "sentence_bonus": 0,
-                "paragraph_bonus": 0,
-                "score_bonus": 0,
-            },
-        }
-    evaluation_patterns = (
-        prefilter.candidate_rules(fields, normalized_fields)
-        if prefilter is not None
-        else patterns
-    )
+    evaluation_patterns = patterns
+    if prefilter is not None:
+        positive_match, evaluation_patterns = prefilter.candidate_rules_with_positive_match(fields, normalized_fields)
+        if not positive_match:
+            return {
+                "score": 0,
+                "hits": {},
+                "hit_fields": {},
+                "snippets": [],
+                "interesting_links": [],
+                "excluded": False,
+                "excluded_labels": [],
+                "required_missing": any(item.rule.kind == "required" for item in patterns),
+                "missing_required_labels": sorted({item.rule.label for item in patterns if item.rule.kind == "required"}),
+                "proximity": {
+                    "window_words": 25,
+                    "pairs": 0,
+                    "minimum_distance": None,
+                    "sentence_bonus": 0,
+                    "paragraph_bonus": 0,
+                    "score_bonus": 0,
+                },
+            }
     multipliers = {"url": 6.0, "title": 5.0, "body": 1.0, "source": 0.75, "links": 2.5}
     hits: Counter[str] = Counter()
     hit_fields: dict[str, set[str]] = {}

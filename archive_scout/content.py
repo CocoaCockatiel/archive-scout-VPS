@@ -6,6 +6,11 @@ import urllib.parse
 from html.parser import HTMLParser
 from pathlib import Path
 
+try:
+    from selectolax.lexbor import LexborHTMLParser
+except Exception:  # pragma: no cover - fallback retained for source-only environments
+    LexborHTMLParser = None
+
 from .constants import BINARY_EXTENSIONS, TEXT_EXTENSIONS
 from .utils import clean_space
 
@@ -132,22 +137,53 @@ def is_text_candidate(url: str, mimetype: str = "") -> bool:
 
 
 def parse_page(raw: str, original: str) -> tuple[str, str, list[str]]:
-    parser = PageParser()
-    try:
-        parser.feed(raw)
-    except Exception:
-        pass
-    visible = clean_space(" ".join(parser.text))
     links: set[str] = set()
-    for value in parser.links:
-        normalized = normalize_link(value, original)
-        if normalized:
-            links.add(normalized)
+    title = ""
+    visible = ""
+    if LexborHTMLParser is not None:
+        try:
+            tree = LexborHTMLParser(raw)
+            title_node = tree.css_first("title")
+            if title_node is not None:
+                title = clean_space(title_node.text(deep=True, separator=" ", strip=True))[:500]
+            root = tree.root
+            if root is not None:
+                for node in root.traverse():
+                    attrs = node.attributes
+                    for key in ("href", "src", "data", "poster", "action", "movie"):
+                        value = attrs.get(key)
+                        if value:
+                            normalized = normalize_link(value, original)
+                            if normalized:
+                                links.add(normalized)
+                for tag in ("script", "style", "noscript", "svg"):
+                    for node in tree.css(tag):
+                        node.decompose()
+                text_root = tree.body or tree.root
+                if text_root is not None:
+                    visible = clean_space(text_root.text(deep=True, separator=" ", strip=True))
+        except Exception:
+            title = ""
+            visible = ""
+            links.clear()
+    if not visible and not links:
+        parser = PageParser()
+        try:
+            parser.feed(raw)
+        except Exception:
+            pass
+        visible = clean_space(" ".join(parser.text))
+        for value in parser.links:
+            normalized = normalize_link(value, original)
+            if normalized:
+                links.add(normalized)
+    if not title:
+        title = title_from_html(raw)
     for value in URL_PATTERN.findall(raw):
         normalized = normalize_link(value, original)
         if normalized:
             links.add(normalized)
-    return title_from_html(raw), visible, sorted(links)
+    return title, visible, sorted(links)
 
 
 def classify_replay_content(raw: str, final_url: str) -> str | None:

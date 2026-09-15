@@ -16,7 +16,7 @@ from ..constants import REPLAY_URL
 from ..content import classify_replay_content, decode_bytes, is_text_candidate, looks_textual_bytes, parse_page
 from ..database.repositories import record_error, record_site_issue, resolve_errors, save_match, upsert_document
 from ..events import ProgressEvent, Stopped
-from ..parsing.embeds import extract_embed_candidates
+from ..parsing.embeds import extract_embed_candidates_fast
 from ..site_status import host_from_url, should_surface_site_issue, site_issue_message
 from ..scanning.jobs import ScanJob
 from ..scanning.keywords import compile_prefilter
@@ -26,9 +26,10 @@ from .rate_limit import SharedFixedRateLimiter, shared_host_gate
 from .validation import classify_exception
 
 
-def replay_url(timestamp: str, original: str) -> str:
+def replay_url(timestamp: str, original: str, modifier: str = "id_") -> str:
     encoded = urllib.parse.quote(original, safe=":/?&=#%+;,[]@!$'()*")
-    return f"{REPLAY_URL}/{timestamp}id_/{encoded}"
+    clean_modifier = modifier if modifier in {"id_", "if_", "oe_"} else "id_"
+    return f"{REPLAY_URL}/{timestamp}{clean_modifier}/{encoded}"
 
 
 def capture_path(root: Path, capture_id: int, timestamp: str, original: str) -> Path:
@@ -208,12 +209,12 @@ def fetch_parse_scan(row: sqlite3.Row, config: ProjectConfig, jobs: list[ScanJob
     if replay_problem:
         raise RuntimeError(replay_problem)
     title, visible, links = parse_page(raw, original)
-    # Reuse the bytes already in memory to recover legacy player/config URLs.
-    # The dedicated media-discovery pass still rechecks the saved page with tag
-    # context, but persisting these URLs here avoids losing embeds that are only
-    # represented in FlashVars or old JavaScript player configuration.
+    # Avoid a second full HTML parser pass in the download hot path. The page
+    # parser above already found ordinary attributes; this lightweight source
+    # pass recovers FlashVars/legacy player config. Dedicated media discovery
+    # still performs the exhaustive parser pass later.
     if config.media.enabled and config.media.discover_embedded:
-        embed_urls = {candidate.url for candidate in extract_embed_candidates(raw, original)}
+        embed_urls = {candidate.url for candidate in extract_embed_candidates_fast(raw, original)}
         if embed_urls:
             links = sorted(set(links).union(embed_urls))
     prepared_fields, prepared_normalized_fields = prepare_analysis_fields(original, title, visible, raw, links)
@@ -234,7 +235,7 @@ def fetch_parse_scan(row: sqlite3.Row, config: ProjectConfig, jobs: list[ScanJob
         "links": links,
         "analyses": analyses,
         "content_hash": hash_text(raw),
-        "normalized_hash": hash_text(normalize_search(visible)),
+        "normalized_hash": hash_text(prepared_normalized_fields["body"]),
         "bytes_saved": len(data),
         "http_status": response["status"],
         "final_url": response["final_url"],
