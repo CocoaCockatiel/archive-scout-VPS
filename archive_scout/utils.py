@@ -15,6 +15,20 @@ from pathlib import Path
 from typing import Iterable
 
 SPACE_PATTERN = re.compile(r"\s+")
+
+JS_ESCAPE_PATTERN = re.compile(r"\\u([0-9A-Fa-f]{4})|\\x([0-9A-Fa-f]{2})")
+
+
+def decode_common_escapes(value: str) -> str:
+    """Decode conservative JavaScript/JSON hex escapes without interpreting backslashes generally."""
+    def repl(match: re.Match[str]) -> str:
+        token = match.group(1) or match.group(2)
+        try:
+            return chr(int(token, 16))
+        except (TypeError, ValueError, OverflowError):
+            return match.group(0)
+    return JS_ESCAPE_PATTERN.sub(repl, value or "")
+
 CDX_RESERVED_PARAMETERS = {
     "url", "from", "to", "output", "fl", "showresumekey", "resumekey", "limit", "matchtype"
 }
@@ -29,7 +43,7 @@ def clean_space(value: str) -> str:
 
 
 def normalize_search(value: str) -> str:
-    value = html.unescape(urllib.parse.unquote(value or ""))
+    value = decode_common_escapes(html.unescape(urllib.parse.unquote(value or "")))
     value = unicodedata.normalize("NFKC", value).casefold().replace("_", " ")
     return clean_space(value)
 

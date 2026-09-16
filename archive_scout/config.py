@@ -253,6 +253,7 @@ class ProjectConfig:
     cdx_match_type: str = ""
     cdx_extra_params: list[str] = field(default_factory=list)
     workers: int = 10
+    scan_workers: int = 0
     download_scope: str = "all_text"
     minimum_score: int = 1
     max_file_mb: float = 25.0
@@ -279,6 +280,10 @@ class ProjectConfig:
     target_settings: dict[str, dict] = field(default_factory=dict)
     auto_backup: bool = True
     backup_keep: int = 5
+    backup_max_mb: float = 1024.0
+    compact_storage: bool = True
+    hitlist_keywords: list[str] = field(default_factory=list)
+    hitlist_file: str = ""
     import_source: str = ""
 
     def normalized_keyword_sets(self) -> list[KeywordSetConfig]:
@@ -361,6 +366,7 @@ class ProjectConfig:
             cdx_match_type=match_type,
             cdx_extra_params=extra_params,
             workers=min(32, max(1, int(self.workers))),
+            scan_workers=min(32, max(0, int(self.scan_workers))),
             download_scope=self.download_scope if self.download_scope in {"all_text", "keyword_urls", "index_only"} else "all_text",
             minimum_score=max(1, int(self.minimum_score)),
             max_file_mb=max(0.1, float(self.max_file_mb)),
@@ -387,6 +393,10 @@ class ProjectConfig:
             target_settings=target_settings,
             auto_backup=bool(self.auto_backup),
             backup_keep=min(50, max(1, int(self.backup_keep))),
+            backup_max_mb=max(64.0, float(self.backup_max_mb)),
+            compact_storage=bool(self.compact_storage),
+            hitlist_keywords=list(dict.fromkeys(str(value).strip() for value in self.hitlist_keywords if str(value).strip())),
+            hitlist_file=str(self.hitlist_file).strip(),
             import_source=str(self.import_source).strip(),
         )
 
@@ -398,7 +408,7 @@ class ProjectConfig:
         settings = self.settings_for_target(target)
         allowed = {
             "from_date", "to_date", "cdx_filters", "cdx_collapses", "cdx_match_type",
-            "cdx_extra_params", "page_size", "cdx_delay", "download_delay", "workers",
+            "cdx_extra_params", "page_size", "cdx_delay", "download_delay", "workers", "scan_workers",
         }
         overrides = {key: value for key, value in settings.items() if key in allowed}
         return replace(self, targets=[normalize_target(target)], **overrides).normalized()
@@ -516,6 +526,7 @@ def load_project_config(path: Path) -> ProjectConfig:
         cdx_match_type=str(payload.get("cdx_match_type", "")),
         cdx_extra_params=list(payload.get("cdx_extra_params") or []),
         workers=loaded_workers,
+        scan_workers=int(payload.get("scan_workers", 0)),
         download_scope=str(payload.get("download_scope", "all_text")),
         minimum_score=int(payload.get("minimum_score", 1)),
         max_file_mb=float(payload.get("max_file_mb", 25.0)),
@@ -600,5 +611,9 @@ def load_project_config(path: Path) -> ProjectConfig:
         target_settings=dict(payload.get("target_settings") or {}),
         auto_backup=bool(payload.get("auto_backup", True)),
         backup_keep=int(payload.get("backup_keep", 5)),
+        backup_max_mb=float(payload.get("backup_max_mb", 1024.0)),
+        compact_storage=bool(payload.get("compact_storage", True)),
+        hitlist_keywords=list(payload.get("hitlist_keywords") or []),
+        hitlist_file=str(payload.get("hitlist_file") or ""),
         import_source=str(payload.get("import_source", "")),
     ).normalized()

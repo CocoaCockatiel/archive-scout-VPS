@@ -27,7 +27,12 @@ class DashboardTests(unittest.TestCase):
                 """
             )
             database.commit()
-            self.assertEqual(read_dashboard_counts(path), {"captures": 1, "documents": 1, "matches": 1, "errors": 1})
+            counts = read_dashboard_counts(path)
+            self.assertEqual(counts["captures"], 1)
+            self.assertEqual(counts["documents"], 1)
+            self.assertEqual(counts["matches"], 1)
+            self.assertEqual(counts["errors"], 1)
+            self.assertEqual(counts["recovery_events"], 0)
             database.execute("INSERT INTO captures DEFAULT VALUES")
             database.execute("INSERT INTO documents DEFAULT VALUES")
             database.commit()
@@ -38,7 +43,8 @@ class DashboardTests(unittest.TestCase):
     def test_missing_database_returns_zeroes(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "missing.sqlite3"
-            self.assertEqual(read_dashboard_counts(path), {"captures": 0, "documents": 0, "matches": 0, "errors": 0})
+            counts = read_dashboard_counts(path)
+            self.assertTrue(all(value == 0 for value in counts.values()))
 
 
 if __name__ == "__main__":

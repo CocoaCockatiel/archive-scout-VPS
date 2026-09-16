@@ -21,6 +21,7 @@ from .media.indexer import index_external_embedded_media, index_media
 from .media.reports import generate_media_reports
 from .projects.integrity import check_project_integrity
 from .projects.backups import create_project_backup
+from .projects.compaction import compact_project_storage
 from .projects.repair import repair_project
 from .projects.diagnostics import export_diagnostics
 from .projects.importers import import_text_folder
@@ -30,12 +31,13 @@ from .reports.text import generate_index_reports, generate_reports
 from .research.index import build_research_index
 from .scanning.jobs import ScanJob
 from .scanning.rescanner import rescan_keyword_sets
+from .scanning.hitlist import load_hitlist, search_with_hitlist
 
 SUPPORTED_MODES = {
     "all", "external_media_after_scan", "index", "download", "resume", "rescan", "retry_errors", "report", "integrity",
     "repair", "backup", "diagnostics", "import_folder",
     "media_all", "media_index", "media_download", "media_retry",
-    "analysis", "research_index", "forum_rebuild", "merge_project",
+    "analysis", "research_index", "forum_rebuild", "merge_project", "hitlist", "compact",
 }
 
 
@@ -64,14 +66,25 @@ def prepare_scan_jobs(
         if keyword_set_id in seen_keyword_set_ids:
             continue
         seen_keyword_set_ids.add(keyword_set_id)
-        run_id = start_scan_run(
-            database,
-            keyword_set_id,
-            f"{keyword_set.name} ({mode})",
-            config.minimum_score,
-            mode,
-            {"keyword_set": keyword_set.name, "rules": keyword_set.rules},
-        )
+        compatible_sources = (mode,) if mode not in {"resume", "download", "all"} else ("all", "download", "resume")
+        placeholders = ",".join("?" for _ in compatible_sources)
+        existing = database.execute(
+            f"""SELECT id FROM scan_runs WHERE keyword_set_id=? AND status='interrupted'
+                AND minimum_score=? AND source_operation IN ({placeholders}) ORDER BY id DESC LIMIT 1""",
+            (keyword_set_id, config.minimum_score, *compatible_sources),
+        ).fetchone()
+        if existing:
+            run_id = int(existing["id"])
+            database.execute(
+                "UPDATE scan_runs SET status='running',completed_at=NULL,name=? WHERE id=?",
+                (f"{keyword_set.name} ({mode})", run_id),
+            )
+        else:
+            run_id = start_scan_run(
+                database, keyword_set_id, f"{keyword_set.name} ({mode})",
+                config.minimum_score, mode,
+                {"keyword_set": keyword_set.name, "rules": keyword_set.rules},
+            )
         jobs.append(ScanJob.create(run_id, keyword_set.name, keyword_set.rules))
     database.commit()
     return jobs
@@ -165,13 +178,13 @@ def run_project(
     try:
         save_project_config(config)
         if mode == "backup":
-            path = create_project_backup(config.output_dir, reason="manual", keep=config.backup_keep)
+            path = create_project_backup(config.output_dir, reason="manual", keep=config.backup_keep, max_mb=config.backup_max_mb)
             emit(callback, ProgressEvent("backup", f"Backup written to {path}"))
             finish_operation_run(database, operation_run_id, "complete", str(path))
             database.commit()
             return {"backup": path}
         if mode == "repair":
-            path = repair_project(config.output_dir, database, callback, keep_backups=config.backup_keep)
+            path = repair_project(config.output_dir, database, callback, keep_backups=config.backup_keep, backup_max_mb=config.backup_max_mb)
             finish_operation_run(database, operation_run_id, "complete", str(path))
             database.commit()
             return {"repair": path}
@@ -185,13 +198,45 @@ def run_project(
             if not source.is_dir():
                 raise ValueError("choose an existing folder to import")
             if config.auto_backup and (config.output_dir / "archive_scout.sqlite3").exists():
-                create_project_backup(config.output_dir, reason="before_import", keep=config.backup_keep)
+                create_project_backup(config.output_dir, reason="before_import", keep=config.backup_keep, max_mb=config.backup_max_mb)
             imported = import_text_folder(config.output_dir, source, database, stop_event, callback)
             report = config.output_dir / "reports" / "import_summary.txt"
             report.write_text(f"Archive Scout import\n\nSource: {source}\nImported: {imported}\n", encoding="utf-8")
             finish_operation_run(database, operation_run_id, "complete", f"Imported {imported}")
             database.commit()
             return {"import_summary": report}
+        if mode == "hitlist":
+            keywords = load_hitlist(config.hitlist_keywords, config.hitlist_file)
+            if not keywords:
+                # A selected keyword set is a convenient fallback for users who
+                # want a quick literal check without duplicating their hitlist.
+                selected = config.selected_keyword_sets()
+                if selected:
+                    from .scanning.keywords import parse_keyword_rules
+                    values: list[str] = []
+                    for keyword_set in selected:
+                        for rule in parse_keyword_rules(keyword_set.rules):
+                            if (not rule.regex and not rule.case_sensitive and not rule.whole_word
+                                    and not rule.excluded and str(rule.expression).strip()):
+                                values.append(str(rule.expression))
+                    keywords = load_hitlist(values)
+            if not keywords:
+                raise ValueError("enter at least one literal keyword or choose a hitlist file")
+            result = search_with_hitlist(config.output_dir, database, keywords, stop_event, callback)
+            finish_operation_run(database, operation_run_id, "complete", f"Hitlist search complete: {result['matches']} matching captures")
+            database.commit()
+            return {"hitlist_csv": Path(result["csv"]), "hitlist_summary": Path(result["summary"])}
+        if mode == "compact":
+            result = compact_project_storage(config.output_dir, database, stop_event, callback)
+            report = config.output_dir / "reports" / "storage_compaction.txt"
+            report.write_text(
+                "Archive Scout storage compaction\n\n" +
+                "\n".join(f"{key}: {value}" for key, value in sorted(result.items())) + "\n",
+                encoding="utf-8",
+            )
+            finish_operation_run(database, operation_run_id, "complete", str(report))
+            database.commit()
+            return {"storage_compaction": report}
         if mode == "integrity":
             path = check_project_integrity(config.output_dir, database, callback)
             emit(callback, ProgressEvent("integrity", f"Integrity report written to {path}"))
@@ -221,7 +266,7 @@ def run_project(
             if not str(source).strip() or not source.exists():
                 raise ValueError("choose an existing Archive Scout project folder to merge")
             if config.auto_backup and (config.output_dir / "archive_scout.sqlite3").exists():
-                create_project_backup(config.output_dir, reason="before_merge", keep=config.backup_keep)
+                create_project_backup(config.output_dir, reason="before_merge", keep=config.backup_keep, max_mb=config.backup_max_mb)
             summary = merge_projects(config.output_dir, source, database, stop_event, callback)
             merge_report = config.output_dir / "reports" / "merge_summary.txt"
             merge_report.write_text("Archive Scout project merge\n\n" + "\n".join(f"{key}: {value}" for key, value in summary.items()) + "\n", encoding="utf-8")
@@ -284,7 +329,7 @@ def run_project(
         elif mode in {"download", "resume"}:
             download_archive(config, database, primary_run_id, stop_event, callback, states=("pending",), scan_jobs=jobs)
         elif mode == "rescan":
-            rescan_keyword_sets(database, jobs, stop_event, callback, workers=config.workers)
+            rescan_keyword_sets(database, jobs, stop_event, callback, workers=(config.scan_workers or None))
         elif mode == "retry_errors":
             retry_error_urls(config, database, primary_run_id, stop_event, callback, jobs)
             media_error_count = database.execute(
@@ -347,6 +392,7 @@ def run_project(
     except ConnectivityPaused as exc:
         with database:
             database.execute("UPDATE captures SET state='pending' WHERE state='downloading'")
+            database.execute("UPDATE captures SET state='downloaded_unscanned' WHERE state='scanning'")
             database.execute("UPDATE media_captures SET state='pending' WHERE state='downloading'")
             finish_jobs(database, jobs, "interrupted")
         finish_operation_run(database, operation_run_id, "paused", str(exc))
@@ -356,6 +402,7 @@ def run_project(
     except RateLimitDeferred as exc:
         with database:
             database.execute("UPDATE captures SET state='pending' WHERE state='downloading'")
+            database.execute("UPDATE captures SET state='downloaded_unscanned' WHERE state='scanning'")
             database.execute("UPDATE media_captures SET state='pending' WHERE state='downloading'")
             finish_jobs(database, jobs, "interrupted")
         finish_operation_run(database, operation_run_id, "interrupted", str(exc))
@@ -371,6 +418,7 @@ def run_project(
     except Stopped:
         with database:
             database.execute("UPDATE captures SET state='pending' WHERE state='downloading'")
+            database.execute("UPDATE captures SET state='downloaded_unscanned' WHERE state='scanning'")
             database.execute("UPDATE media_captures SET state='pending' WHERE state='downloading'")
             finish_jobs(database, jobs, "interrupted")
         finish_operation_run(database, operation_run_id, "interrupted", "Stopped by user")
@@ -383,6 +431,7 @@ def run_project(
         # before the project is reopened and crash-recovery runs.
         with database:
             database.execute("UPDATE captures SET state='pending' WHERE state='downloading'")
+            database.execute("UPDATE captures SET state='downloaded_unscanned' WHERE state='scanning'")
             database.execute("UPDATE media_captures SET state='pending' WHERE state='downloading'")
             if jobs:
                 finish_jobs(database, jobs, "failed")
@@ -390,4 +439,11 @@ def run_project(
         database.commit()
         raise
     finally:
+        # Once worker pools have drained, checkpoint WAL so a clean Pause & Save
+        # or normal shutdown has a small, self-contained durable database.
+        try:
+            database.commit()
+            database.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error:
+            pass
         database.close()

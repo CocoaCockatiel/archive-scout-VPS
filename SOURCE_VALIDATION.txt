@@ -1,68 +1,56 @@
-Archive Scout 1.0.5 source validation
-Date: 2026-09-12
+Archive Scout 1.0.6 source validation
+Date: 2026-09-15
 
 Release scope
-- Fast-indexing and flat-media release built on Archive Scout 1.0.4 and database schema version 7.
-- Automatic URL indexing now follows the reference downloader's Timemap acquisition model: Timemap JSON first, showNumPages once per saved window, fixed pageSize=9 in Auto mode, ten concurrent page workers, 0.75-second shared CDX request spacing (about 80 request starts/minute), and rolling queues of up to 1,000 numbered pages.
-- Successful numbered pages are consumed and committed individually as they finish; one slow page does not create a ten-request batch barrier.
-- Auto mode forces pageSize=9 even when an older saved queue carried another numbered-page block value. Explicit paged mode still permits custom page grouping.
-- Timemap showNumPages parsing accepts the reference service's two-row JSON table shape as well as Archive Scout's existing compatibility shapes.
-- Resume-key traversal remains available explicitly and remains the recovery fallback when Timemap pagination is unavailable, repeatedly pathological, or must be subdivided.
-- Direct-media indexing uses the same Timemap-first page-count / pageSize=9 / ten-worker / 1,000-page pipeline in Auto mode.
-- Media output is fixed to two flat directories only for v1.0.5-created output: media/images and media/videos. No host, timestamp, URL-path, fingerprint, or nested media directories are created by normal v1.0.5 media downloads or project merges.
-- Media filenames use the raw final URL path component. Timestamp/database-id prefixes are removed and percent-escaped URL spelling is retained. Characters that cannot be represented as one portable Windows/macOS/Linux filename are percent-escaped rather than replaced with opaque names.
-- Media replay acquisition follows the reference downloader's modifier logic: if_ for normal files and oe_ for SWF.
-- Media replay keeps the v1.0.4 fast envelope of ten workers and 0.125-second shared request-start spacing (eight starts/second by default), guarantees at least five transient attempts, prioritizes known-small captures, and reuses an exact existing destination without another network request.
-- Existing v1.0.4 text-format coverage, high-throughput text replay, native/fallback scan accelerators, index-only report repair, recovery controls, AI/Research Intelligence, review state, CLI automation, and project safety remain intact.
+- Maximum-recall scanning, durable stage-based resume, storage efficiency, auditable skip/error state, URL-derived filenames, Search with Hitlist, and per-page indexing checkpoints.
+- Automatic indexing retains the v1.0.5 Timemap profile: pageSize=9, ten bounded workers, 0.75-second shared CDX request spacing, rolling queues up to 1,000 pages, and resume-key/date-window recovery fallbacks.
+- Database schema version 8 migrates supported v1.0.x projects non-destructively.
 
-Automated validation
-- 196 automated tests ran: 193 passed and 3 were skipped.
-- 3 tests were skipped in this environment: 1 display-dependent theme test and 2 native-accelerator execution tests because those optional native wheels are not installed locally. The CI matrix installs the declared runtime dependencies and executes the native-path checks.
-- New v1.0.5 regression coverage verifies the fixed Auto Timemap profile, forced pageSize=9 for legacy saved queues, 1,000-page rolling queue selection, Timemap's two-row showNumPages response, v1.0.4 automatic-profile migration, flat images/videos media paths, raw percent-escaped URL filenames, if_/oe_ replay modifiers, two-folder creation, and no-network reuse of an exact existing media destination.
-- Existing database migration tests passed; database schema remains version 7 and no schema migration is required from v1.0.4.
-- Python compilation completed for archive_scout, tests, scripts, run_app.py, and run_cli.py.
-- scripts/build_linux.sh passed bash syntax validation.
-- scripts/build_macos.sh passed bash syntax validation.
+Local automated validation
+- 211 automated tests ran successfully; 3 were skipped in this container (2 optional native-accelerator execution tests because ahocorasick-rs/selectolax wheels are not installed here, and 1 display-dependent Tk theme test).
+- Python compileall passed for archive_scout, tests, scripts, run_app.py, and run_cli.py.
+- scripts/build_linux.sh and scripts/build_macos.sh passed bash syntax validation.
 - git diff --check passed.
-- Python wheel packaging completed successfully as archive_scout-1.0.5-py3-none-any.whl using pip --no-deps --no-build-isolation.
-- Wheel SHA256: 525327ea4bbaa58aff5ae7946cdc0b1abd8b162676a733eebf982bc9cf093ede.
-- Public application/package version is 1.0.5.
-- Database schema version is 7.
+- Offline benchmark completed with zero HTTP attempts.
+- Native multi-platform GitHub Actions/build smoke tests must still run on the exact release commit before publishing platform binaries.
 
-Indexing-performance validation
-- Auto selects paged acquisition and places the Timemap JSON endpoint first while retaining CDX/Timemap fallback endpoints.
-- Auto uses pageSize=9 and effective_page_workers(10, 9) resolves to ten concurrent numbered-page workers.
-- A synthetic saved queue with page_blocks=50 is normalized to pageSize=9 when Auto mode resumes, preventing old settings from reducing the new fast pipeline's concurrency.
-- The page scheduler selects up to 1,000 page numbers at a time and feeds them through the bounded ten-thread request pool; results are yielded as each future completes.
-- The existing shared CDX limiter retains 0.75-second request-start spacing, matching the reference downloader's StrictLimiter(80/60) request envelope while preserving Archive Scout's process-wide host gate and recovery state.
-- Direct-media indexing uses the same page-count, fixed grouping, concurrency, endpoint order, and rolling-queue architecture.
-- Resume-key traversal and date-window subdivision remain intact as recovery mechanisms rather than the normal Auto acquisition path.
+Recall/storage/resume coverage includes
+- full-source search beyond the former 500,000-character cutoff;
+- UTF-16 textual detection/decoding and common escape normalization;
+- ambiguous MIME/extension classification that avoids silent text skips;
+- direct Aho-Corasick literal scoring parity;
+- resumable Search with Hitlist URL/local-content coverage;
+- explicit non-text/URL-filter skip accounting separate from Open Errors;
+- keyword_urls -> all_text requeue behavior;
+- URL-derived portable text/media filenames;
+- downloaded_unscanned recovery state and per-page index completion tables;
+- compact/contentless FTS and legacy-body compaction without deleting canonical capture files;
+- macOS outer Archive Scout.app / inner Wayback Machine Downloader packaging identity.
 
-Media-layout and fetching validation
-- A media run with no pending captures creates media/images and media/videos and no other child folders.
-- Image and video path tests confirm one flat filename level beneath the respective type directory.
-- URL path spelling is preserved: a URL ending in photo%20one.jpg is stored as media/images/photo%20one.jpg rather than being decoded, timestamped, hashed, or placed in a host/path tree.
-- Normal replay URLs contain <timestamp>if_/ and SWF replay URLs contain <timestamp>oe_/.
-- If the exact flat destination already exists, fetch_media hashes/reuses it and does not invoke network download, matching the reference downloader's preflight behavior.
-- Download scheduling remains length-aware: known-size media is streamed in ascending length order before unknown-size rows.
-- Media HTTP work remains bounded by the configured worker pool and shared request-start limiter; response bodies stream to .part files and are atomically promoted instead of being held as whole-project in-memory buffers.
+Offline 100k benchmark on this container
+- parse_cdx_chunks: 2.330972 s
+- literal_prefilter: 0.528872 s
+- literal_scoring: 0.511527 s
+- parse_and_upsert_cdx_chunks: 3.897029 s
+- repeat_parse_and_noop_upsert: 3.133141 s (0 unchanged writes)
+- browse_500: 0.011877 s
+- export_json: 0.711381 s
+- HTTP attempts: 0
 
-Offline 100,000-row performance validation
-- 100,000 CDX rows parsed in 2.282789 seconds.
-- Literal prefilter benchmark completed in 0.522803 seconds.
-- Literal scoring benchmark completed in 0.498874 seconds.
-- Parse-and-upsert completed in 3.859442 seconds.
-- Repeating the same 100,000-row index completed in 3.079621 seconds and produced 0 unchanged-row database writes.
-- Result browsing (500 rows) completed in 0.010167 seconds.
-- JSON export completed in 0.671984 seconds.
-- HTTP attempts: 0.
+Reference v1.0.5 local benchmark from the preceding release
+- parse_cdx_chunks: 2.282789 s
+- literal_prefilter: 0.522803 s
+- literal_scoring: 0.498874 s
+- parse_and_upsert_cdx_chunks: 3.859442 s
+- repeat_parse_and_noop_upsert: 3.079621 s
+- browse_500: 0.010167 s
+- export_json: 0.671984 s
 
-Release limitations / remaining gates
-- Offline/source validation does not claim a guaranteed live Internet Archive indexing or media completion rate. Wayback latency, server-side throttling, archive topology, capture size, and temporary service behavior remain external variables.
-- A live Internet Archive large-site stress test was not performed in this validation environment. The release reproduces the reference downloader's request envelopes and Timemap queue architecture without bypassing Archive Scout's coordinated recovery/safety controls.
-- The flat exact-URL-filename policy inherently means two different media URLs with the same final path filename map to the same destination. Matching the reference preflight behavior, the first exact destination already present is reused rather than renamed with an Archive Scout id/timestamp.
-- Existing legacy media trees are not destructively flattened automatically; v1.0.5 stops creating deeper folders and all new/merged media destinations use only images/videos. This avoids silently deleting or overwriting older project files during upgrade.
-- Native Windows, macOS, and Linux distributable binaries were not produced in this container because PyInstaller is not installed here.
-- GitHub Actions must produce and smoke-test the actual native GUI and ArchiveScoutCLI packages on the release commit.
-- Real Windows signing, macOS signing/notarization, and release-upload transactions were not performed.
-- Publish tag v1.0.5 only after the GitHub Actions matrix and native package smoke tests pass on the exact patched release commit.
+The v1.0.6 index path remains within the same performance range while adding per-page durability.
+
+Packaging validation
+- Python wheel built successfully as archive_scout-1.0.6-py3-none-any.whl.
+- Wheel SHA256: 622ed0181e33d801e122be52f458fdec9a27b2544d545690a885bfdd9dc9cb4c.
+- Unified v1.0.6 patch passed git apply --check and a real apply against the exact reconstructed v1.0.5 baseline commit e7a1302.
+- Every file produced by the applied unified patch matched the v1.0.6 working implementation byte-for-byte.
+- The replacement-files ZIP contained exactly the changed-file list and every file matched the v1.0.6 working implementation byte-for-byte.

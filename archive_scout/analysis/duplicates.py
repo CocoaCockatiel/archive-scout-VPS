@@ -7,6 +7,7 @@ import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
 
+from ..document_store import document_body
 from ..utils import normalize_search, utc_now
 
 TOKEN_PATTERN = re.compile(r"[\w'-]+", re.UNICODE)
@@ -81,7 +82,7 @@ def cluster_duplicates(database: sqlite3.Connection, threshold: float = 0.90) ->
     for row in database.execute(
         """
         SELECT id,content_hash,normalized_hash
-        FROM documents WHERE COALESCE(body_text,'')<>'' ORDER BY id
+        FROM documents ORDER BY id
         """
     ):
         document_id = int(row["id"])
@@ -105,10 +106,10 @@ def cluster_duplicates(database: sqlite3.Connection, threshold: float = 0.90) ->
     hashes: dict[int, int] = {}
     buckets: dict[tuple[int, int], list[int]] = defaultdict(list)
     for row in database.execute(
-        "SELECT id,body_text FROM documents WHERE COALESCE(body_text,'')<>'' ORDER BY id"
+        "SELECT * FROM documents ORDER BY id"
     ):
         document_id = int(row["id"])
-        value = simhash64(str(row["body_text"] or ""))
+        value = simhash64(document_body(row))
         hashes[document_id] = value
         for band in range(4):
             buckets[(band, (value >> (band * 16)) & 0xFFFF)].append(document_id)

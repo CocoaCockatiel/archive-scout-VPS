@@ -174,13 +174,26 @@ def _write_limited(
     max_bytes: int,
     stop_event: threading.Event,
     preview_bytes: int = 20_000,
+    *,
+    append: bool = False,
 ) -> tuple[int, str, bytes]:
     destination.parent.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256()
     preview = bytearray()
-    total = 0
+    prefix = destination.stat().st_size if append and destination.exists() else 0
+    if prefix:
+        with destination.open("rb") as existing:
+            while True:
+                chunk = existing.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                if len(preview) < preview_bytes:
+                    preview.extend(chunk[: preview_bytes - len(preview)])
+    total = prefix
+    mode = "ab" if append and prefix else "wb"
     try:
-        with destination.open("wb") as handle:
+        with destination.open(mode) as handle:
             for chunk in chunks:
                 if stop_event.is_set():
                     raise Stopped
@@ -194,8 +207,17 @@ def _write_limited(
                 if len(preview) < preview_bytes:
                     preview.extend(chunk[: preview_bytes - len(preview)])
         return total, digest.hexdigest(), bytes(preview)
+    except Stopped:
+        # A partially streamed replay is durable resume state. Leave it intact.
+        raise
+    except RuntimeError as exc:
+        # A local size/safety rejection cannot become a valid Range resume.
+        if "response exceeds" in str(exc).casefold():
+            destination.unlink(missing_ok=True)
+        raise
     except Exception:
-        destination.unlink(missing_ok=True)
+        # Network reads can fail after useful bytes reached disk. Preserve those
+        # bytes so HttpClient can retry with Range or a later run can resume.
         raise
 
 
@@ -275,8 +297,9 @@ class HttpxBackend:
             announced = response.headers.get("Content-Length")
             if announced and announced.isdigit() and int(announced) > max_bytes:
                 raise RuntimeError(f"response exceeds {max_bytes:,} bytes")
+            append = int(response.status_code) == 206 and bool(headers.get("Range")) and destination.exists()
             total, content_hash, preview = _write_limited(
-                response.iter_bytes(1024 * 1024), destination, max_bytes, stop_event
+                response.iter_bytes(1024 * 1024), destination, max_bytes, stop_event, append=append
             )
             return TransportFileResponse(
                 status=int(response.status_code),
@@ -406,9 +429,10 @@ class Urllib3Backend:
             announced = response.headers.get("Content-Length")
             if announced and str(announced).isdigit() and int(announced) > max_bytes:
                 raise RuntimeError(f"response exceeds {max_bytes:,} bytes")
+            append = int(response.status) == 206 and bool(headers.get("Range")) and destination.exists()
             total, content_hash, preview = _write_limited(
                 response.stream(amt=1024 * 1024, decode_content=True),
-                destination, max_bytes, stop_event,
+                destination, max_bytes, stop_event, append=append,
             )
             result = TransportFileResponse(
                 status=int(response.status),
@@ -540,7 +564,9 @@ class CurlBackend:
         ensure_frozen_bundle_available()
         started = time.monotonic()
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.unlink(missing_ok=True)
+        resume = bool(headers.get("Range")) and destination.exists() and destination.stat().st_size > 0
+        if not resume:
+            destination.unlink(missing_ok=True)
         with tempfile.TemporaryDirectory(prefix="archive-scout-curl-") as temp_dir:
             header_path = Path(temp_dir) / "headers.txt"
             command = [
@@ -550,6 +576,8 @@ class CurlBackend:
                 "--max-filesize", str(int(max_bytes)), "--dump-header", str(header_path),
                 "--output", str(destination), "--write-out", "%{http_code}\n%{url_effective}",
             ]
+            if resume:
+                command.extend(["--continue-at", "-"])
             for key, value in headers.items():
                 command.extend(["--header", f"{key}: {value}"])
             command.extend(["--", url])
@@ -562,12 +590,16 @@ class CurlBackend:
                 if stop_event.wait(0.2):
                     proc.kill()
                     proc.wait(timeout=5)
-                    destination.unlink(missing_ok=True)
+                    # Preserve partial replay bytes so the next run can send Range.
                     raise Stopped
             stdout, stderr = proc.communicate()
             if proc.returncode != 0:
-                destination.unlink(missing_ok=True)
                 message = (stderr or stdout or f"curl exited {proc.returncode}").strip()
+                # Keep partial bytes for timeout/connection failures. The next
+                # attempt uses curl --continue-at / HTTP Range. Empty files are
+                # not useful resume state.
+                if destination.exists() and destination.stat().st_size == 0:
+                    destination.unlink(missing_ok=True)
                 if proc.returncode == 28:
                     raise TimeoutError(message)
                 raise OSError(message)
@@ -580,7 +612,6 @@ class CurlBackend:
             with destination.open("rb") as handle:
                 while chunk := handle.read(1024 * 1024):
                     if stop_event.is_set():
-                        destination.unlink(missing_ok=True)
                         raise Stopped
                     digest.update(chunk)
                     if len(preview) < 20_000:
@@ -741,6 +772,8 @@ class ResilientTransport:
                 failures.append((name, exc))
             except Exception as exc:
                 failures.append((name, exc))
+            # Failed backends may have written corrupt/non-resumable bytes. Only
+            # a user stop is retained; transport failures restart cleanly.
             destination.unlink(missing_ok=True)
             with self.lock:
                 self.cooldown_until[name] = time.monotonic() + 30.0

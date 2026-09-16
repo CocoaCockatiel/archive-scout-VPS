@@ -16,6 +16,7 @@ from ..constants import CDX_URL
 from ..cdx.parameters import cdx_endpoints
 from ..database.repositories import upsert_media_capture
 from ..downloads.rate_limit import SharedFixedRateLimiter, shared_host_gate
+from ..document_store import document_body
 from ..events import ProgressEvent, Stopped
 from ..extraction.provenance import trace_provenance
 from ..extraction.regex import parse_extractor_rules, run_extractors
@@ -302,8 +303,7 @@ def run_analysis(
                 database.execute("DELETE FROM legacy_assets")
         rows = database.execute(
             """
-            SELECT d.id AS document_id,d.path,d.title,d.body_text,d.links_json,
-                   c.id AS capture_id,c.original_url,c.timestamp
+            SELECT d.*,d.id AS document_id,c.id AS capture_id,c.original_url,c.timestamp
             FROM documents d JOIN captures c ON c.id=d.capture_id
             ORDER BY d.id
             """
@@ -360,7 +360,7 @@ def run_analysis(
                 links = json_value(row["links_json"], [])
                 fields = {
                     "title": str(row["title"] or ""),
-                    "body": str(row["body_text"] or ""),
+                    "body": document_body(row),
                     "url": original_url,
                     "source": raw,
                     "links": "\n".join(str(value) for value in links),

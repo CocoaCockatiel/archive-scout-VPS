@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Callable
 
 from ..config import ProjectConfig
-from ..database.repositories import get_or_create_target, record_error, record_site_issue, upsert_captures
+from ..database.repositories import get_or_create_target, record_error, record_recovery_event, record_site_issue, upsert_captures
 from ..downloads.rate_limit import SharedFixedRateLimiter, shared_host_gate
 from ..events import ConnectivityPaused, ProgressEvent, Stopped
 from ..site_status import host_from_url, site_issue_message
@@ -390,12 +390,10 @@ def _defer_transient_window(
     message = f"{type(exc).__name__}: {exc}"
     network = config.network.normalized()
     with database:
-        error_id = record_error(
-            database,
-            "index",
-            "transient_index_delay",
+        record_recovery_event(
+            database, "index", "transient_index_delay",
             f"{window_label(current.start, current.end)}: {message}",
-            retryable=True,
+            details={"failures": current.failures, "strategy": current.strategy},
         )
         _record_network_event(
             database,
@@ -572,6 +570,7 @@ def _request_paged_batch(
     current: PendingWindow,
     stop_event: threading.Event,
     consume_success: Callable[[PageFetchResult], None] | None = None,
+    completed_pages: set[int] | None = None,
 ) -> PagedBatch:
     endpoints = cdx_paged_endpoints(config)
     network = config.network.normalized()
@@ -593,13 +592,18 @@ def _request_paged_batch(
     # downloader's 1,000-page task chunks. A single slow Timemap page no longer
     # creates a barrier that leaves the other nine workers idle.
     pages, next_page = _select_page_batch(current, max(page_workers, PAGED_PIPELINE_PAGES))
-    if not pages:
-        return PagedBatch([], [], True)
+    completed_pages = completed_pages or set()
+    requested_pages = [page for page in pages if page not in completed_pages]
+    if not requested_pages:
+        current.page = next_page
+        current.retry_pages = [page for page in current.retry_pages if page not in completed_pages]
+        finished = current.page >= current.page_count and not current.retry_pages
+        return PagedBatch([], pages, finished)
     results: list[PageFetchResult] = []
     for result in iter_cdx_pages(
         client,
         endpoints,
-        pages,
+        requested_pages,
         lambda page: build_paged_cdx_params(config, target, current.start, current.end, page, current.page_blocks),
         stop_event,
         workers=page_workers,
@@ -749,12 +753,31 @@ def index_archive(
                         changed = 0
                         write_seconds = 0.0
 
+                        completed_pages = {
+                            int(row[0]) for row in database.execute(
+                                """SELECT page FROM index_pages WHERE query_signature=? AND target_id=?
+                                   AND window_start=? AND window_end=? AND status='complete'""",
+                                (signature, target_id, current.start, current.end),
+                            )
+                        }
+
                         def store_completed_page(result: PageFetchResult) -> None:
                             nonlocal received, changed, write_seconds
                             page_received = len(result.rows)
                             write_started = time.monotonic()
+                            # Capture rows and their page checkpoint are one
+                            # transaction: after a power loss the page is either
+                            # wholly eligible for retry or already known complete.
                             with database:
                                 changed += upsert_captures(database, result.rows, target_id, signature)
+                                database.execute(
+                                    """INSERT INTO index_pages(query_signature,target_id,window_start,window_end,page,row_count,status,updated_at)
+                                       VALUES(?,?,?,?,?,?,'complete',?)
+                                       ON CONFLICT(query_signature,target_id,window_start,window_end,page) DO UPDATE SET
+                                       row_count=excluded.row_count,status='complete',updated_at=excluded.updated_at""",
+                                    (signature, target_id, current.start, current.end, int(result.page), page_received, utc_now()),
+                                )
+                            completed_pages.add(int(result.page))
                             write_seconds += time.monotonic() - write_started
                             received += page_received
                             # Release the largest object while sibling requests
@@ -763,7 +786,7 @@ def index_archive(
                             result.rows.clear()
 
                         batch = _request_paged_batch(
-                            client, target_config, target, current, stop_event, store_completed_page
+                            client, target_config, target, current, stop_event, store_completed_page, completed_pages
                         )
                         request_seconds = max(0.0, time.monotonic() - request_started - write_seconds)
                         successes = batch.successful
@@ -832,12 +855,9 @@ def index_archive(
                                 plan.planned += added
                                 total_windows += added
                             with database:
-                                error_id = record_error(
-                                    database,
-                                    "index",
-                                    "slow_page_fallback",
+                                record_recovery_event(
+                                    database, "index", "slow_page_fallback",
                                     f"{target} {label}: one CDX page failed repeatedly; switching the saved window to smaller resume-key work.",
-                                    retryable=True,
                                 )
                                 save_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
                             emit(callback, ProgressEvent("index", f"One CDX page remained slow for {target} {label}; successful pages were kept and the remaining range was converted to smaller resumable windows.", completed_windows, total_windows))
@@ -857,12 +877,10 @@ def index_archive(
                         if permanent is not None:
                             raise permanent
                         with database:
-                            error_id = record_error(
-                                database,
-                                "index",
-                                "transient_page_retry",
+                            record_recovery_event(
+                                database, "index", "transient_page_retry",
                                 f"{target} {label}: {len(failures)} CDX page(s) requeued: {failure_exc}",
-                                retryable=True,
+                                details={"pages": [item.page for item in failures]},
                             )
                             _record_network_event(
                                 database,
@@ -929,13 +947,16 @@ def index_archive(
                         current.failures += 1
                         network = target_config.network.normalized()
                         with database:
-                            error_id = record_error(
-                                database,
-                                "index",
-                                "wayback_connection_unavailable",
-                                f"{target} {label}: {exc}",
-                                retryable=True,
-                            )
+                            if connection_failure_streak >= network.connection_failure_pause_threshold:
+                                error_id = record_error(
+                                    database, "index", "wayback_connection_unavailable",
+                                    f"{target} {label}: {exc}", retryable=True,
+                                )
+                            else:
+                                record_recovery_event(
+                                    database, "index", "connection_retry", f"{target} {label}: {exc}",
+                                    details={"streak": connection_failure_streak},
+                                )
                             _record_network_event(
                                 database,
                                 "connection",

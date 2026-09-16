@@ -69,7 +69,14 @@ EXTRACTED_CLI="$VERIFY_ROOT/ArchiveScout-macOS-Universal/ArchiveScoutCLI"
 cleanup() { rm -rf "$VERIFY_ROOT"; }
 trap cleanup EXIT
 
-python scripts/verify_macos_bundle.py "$APP"
+# Keep the product/bundle name Archive Scout while exposing the smallest
+# possible process identity change for Discord's automatic activity detector.
+# This is intentionally not Rich Presence and adds no Discord dependency.
+INNER_EXECUTABLE="$APP/Contents/MacOS/Wayback Machine Downloader"
+mv "$APP/Contents/MacOS/Archive Scout" "$INNER_EXECUTABLE"
+/usr/libexec/PlistBuddy -c "Set :CFBundleExecutable Wayback Machine Downloader" "$APP/Contents/Info.plist"
+
+python scripts/verify_macos_bundle.py "$APP" --expected-executable "Wayback Machine Downloader"
 codesign --force --deep --sign - "$APP"
 codesign --force --sign - "$CLI"
 codesign --verify --deep --strict --verbose=2 "$APP"
@@ -77,7 +84,7 @@ codesign --verify --strict --verbose=2 "$CLI"
 
 STARTUP_LOG="$HOME/Library/Logs/Archive Scout/startup-error.log"
 rm -f "$STARTUP_LOG"
-ARCHIVE_SCOUT_STARTUP_PROBE=1 "$APP/Contents/MacOS/Archive Scout"
+ARCHIVE_SCOUT_STARTUP_PROBE=1 "$APP/Contents/MacOS/Wayback Machine Downloader"
 if [[ -s "$STARTUP_LOG" ]]; then
   cat "$STARTUP_LOG" >&2
   exit 1
@@ -93,7 +100,7 @@ cp README.md "$PACKAGE/README.md"
 
 ditto -c -k --sequesterRsrc --keepParent "$PACKAGE" "$ZIP"
 ditto -x -k "$ZIP" "$VERIFY_ROOT"
-python scripts/verify_macos_bundle.py "$EXTRACTED_APP"
+python scripts/verify_macos_bundle.py "$EXTRACTED_APP" --expected-executable "Wayback Machine Downloader"
 codesign --verify --deep --strict --verbose=2 "$EXTRACTED_APP"
 codesign --verify --strict --verbose=2 "$EXTRACTED_CLI"
 "$EXTRACTED_CLI" --help >/dev/null

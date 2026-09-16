@@ -26,6 +26,11 @@ CREATE TABLE IF NOT EXISTS captures(
     digest TEXT,
     length INTEGER NOT NULL DEFAULT 0,
     state TEXT NOT NULL DEFAULT 'pending',
+    skip_reason TEXT,
+    classifier_revision INTEGER NOT NULL DEFAULT 0,
+    local_path TEXT,
+    content_hash TEXT,
+    detected_encoding TEXT,
     download_attempts INTEGER NOT NULL DEFAULT 0,
     document_id INTEGER,
     http_status INTEGER,
@@ -47,6 +52,9 @@ CREATE TABLE IF NOT EXISTS documents(
     path TEXT NOT NULL,
     title TEXT,
     body_text TEXT,
+    body_zlib BLOB,
+    body_chars INTEGER NOT NULL DEFAULT 0,
+    original_url TEXT,
     links_json TEXT,
     content_hash TEXT,
     normalized_hash TEXT,
@@ -144,6 +152,77 @@ CREATE TABLE IF NOT EXISTS index_state(
     PRIMARY KEY(target_id,year,query_signature),
     FOREIGN KEY(target_id) REFERENCES targets(id) ON DELETE CASCADE,
     FOREIGN KEY(error_id) REFERENCES errors(id)
+);
+CREATE TABLE IF NOT EXISTS index_pages(
+    query_signature TEXT NOT NULL,
+    target_id INTEGER NOT NULL,
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    page INTEGER NOT NULL,
+    row_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'complete',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(query_signature,target_id,window_start,window_end,page),
+    FOREIGN KEY(target_id) REFERENCES targets(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS index_pages_status_idx ON index_pages(query_signature,target_id,window_start,window_end,status,page);
+CREATE TABLE IF NOT EXISTS media_index_pages(
+    query_signature TEXT NOT NULL,
+    target_id INTEGER NOT NULL,
+    extension TEXT NOT NULL DEFAULT '',
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    page INTEGER NOT NULL,
+    row_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'complete',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(query_signature,target_id,extension,window_start,window_end,page)
+);
+CREATE INDEX IF NOT EXISTS media_index_pages_status_idx ON media_index_pages(query_signature,target_id,extension,window_start,window_end,status,page);
+CREATE TABLE IF NOT EXISTS quick_search_runs(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint TEXT NOT NULL,
+    keywords_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    last_capture_id INTEGER NOT NULL DEFAULT 0,
+    indexed_checked INTEGER NOT NULL DEFAULT 0,
+    local_checked INTEGER NOT NULL DEFAULT 0,
+    unavailable_count INTEGER NOT NULL DEFAULT 0,
+    match_count INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS quick_search_runs_fingerprint_idx ON quick_search_runs(fingerprint,id DESC);
+CREATE TABLE IF NOT EXISTS quick_search_hits(
+    run_id INTEGER NOT NULL,
+    capture_id INTEGER NOT NULL,
+    keyword TEXT NOT NULL,
+    fields TEXT NOT NULL DEFAULT '',
+    count INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY(run_id,capture_id,keyword),
+    FOREIGN KEY(run_id) REFERENCES quick_search_runs(id) ON DELETE CASCADE,
+    FOREIGN KEY(capture_id) REFERENCES captures(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS quick_search_hits_capture_idx ON quick_search_hits(run_id,capture_id);
+CREATE TABLE IF NOT EXISTS recovery_events(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage TEXT NOT NULL,
+    category TEXT NOT NULL,
+    message TEXT NOT NULL,
+    capture_id INTEGER,
+    media_capture_id INTEGER,
+    details_json TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS recovery_events_created_idx ON recovery_events(created_at,id);
+CREATE TABLE IF NOT EXISTS storage_objects(
+    content_hash TEXT PRIMARY KEY,
+    canonical_path TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    reference_count INTEGER NOT NULL DEFAULT 1,
+    storage_method TEXT NOT NULL DEFAULT 'file',
+    updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS reviews(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -264,6 +343,8 @@ CREATE TABLE IF NOT EXISTS media_captures(
     digest TEXT,
     length INTEGER NOT NULL DEFAULT 0,
     state TEXT NOT NULL DEFAULT 'pending',
+    skip_reason TEXT,
+    classifier_revision INTEGER NOT NULL DEFAULT 0,
     download_attempts INTEGER NOT NULL DEFAULT 0,
     path TEXT,
     http_status INTEGER,
@@ -636,6 +717,25 @@ def migrate_v6_to_v7(database: sqlite3.Connection) -> None:
     database.execute("UPDATE schema_info SET version=7")
 
 
+
+def migrate_v7_to_v8(database: sqlite3.Connection) -> None:
+    database.executescript(BASE_SCHEMA_SQL)
+    add_column_if_missing(database, "captures", "skip_reason TEXT")
+    add_column_if_missing(database, "captures", "classifier_revision INTEGER NOT NULL DEFAULT 0")
+    add_column_if_missing(database, "captures", "local_path TEXT")
+    add_column_if_missing(database, "captures", "content_hash TEXT")
+    add_column_if_missing(database, "captures", "detected_encoding TEXT")
+    add_column_if_missing(database, "documents", "body_zlib BLOB")
+    add_column_if_missing(database, "documents", "body_chars INTEGER NOT NULL DEFAULT 0")
+    add_column_if_missing(database, "documents", "original_url TEXT")
+    add_column_if_missing(database, "media_captures", "skip_reason TEXT")
+    add_column_if_missing(database, "media_captures", "classifier_revision INTEGER NOT NULL DEFAULT 0")
+    database.execute(
+        "UPDATE documents SET original_url=(SELECT original_url FROM captures WHERE captures.id=documents.capture_id) "
+        "WHERE COALESCE(original_url,'')=''"
+    )
+    database.execute("UPDATE schema_info SET version=8")
+
 def initialize_schema(database: sqlite3.Connection) -> None:
     database.execute("PRAGMA foreign_keys=ON")
     has_schema = database.execute(
@@ -654,28 +754,59 @@ def initialize_schema(database: sqlite3.Connection) -> None:
             migrate_v4_to_v5(database)
             migrate_v5_to_v6(database)
             migrate_v6_to_v7(database)
+            migrate_v7_to_v8(database)
         elif version == 3:
             migrate_v3_to_v4(database)
             migrate_v4_to_v5(database)
             migrate_v5_to_v6(database)
             migrate_v6_to_v7(database)
+            migrate_v7_to_v8(database)
         elif version == 4:
             migrate_v4_to_v5(database)
             migrate_v5_to_v6(database)
             migrate_v6_to_v7(database)
+            migrate_v7_to_v8(database)
         elif version == 5:
             migrate_v5_to_v6(database)
             migrate_v6_to_v7(database)
+            migrate_v7_to_v8(database)
         elif version == 6:
             migrate_v6_to_v7(database)
+            migrate_v7_to_v8(database)
+        elif version == 7:
+            migrate_v7_to_v8(database)
         elif version != SCHEMA_VERSION:
             raise RuntimeError(f"unsupported Archive Scout schema version: {version}")
         else:
             database.executescript(BASE_SCHEMA_SQL)
     try:
+        # v1.0.6 uses a contentless FTS5 index. The canonical replay payload
+        # remains on disk, so FTS stores only its inverted token index rather
+        # than another full copy of each document body.
+        fts_sql = database.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='documents_fts'"
+        ).fetchone()
+        recreate_fts = bool(fts_sql and "content=''" not in str(fts_sql[0] or ""))
+        if recreate_fts:
+            database.execute("DROP TABLE documents_fts")
         database.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(title,body_text,original_url)"
+            "CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(title,body_text,original_url,content='')"
         )
         database.execute("INSERT OR REPLACE INTO project_meta(key,value) VALUES('fts5','1')")
+        database.execute("INSERT OR REPLACE INTO project_meta(key,value) VALUES('fts_contentless','1')")
+        database.execute("DELETE FROM project_meta WHERE key='fts_external_content'")
+        # During a v1.0.5 -> v1.0.6 migration the legacy body_text is still
+        # available. Seed the new compact token index before compaction removes
+        # that redundant full-text copy. New documents are indexed on upsert.
+        if recreate_fts:
+            rows = database.execute(
+                """SELECT d.id,d.title,d.body_text,d.original_url,c.original_url AS capture_original_url
+                   FROM documents d JOIN captures c ON c.id=d.capture_id
+                   WHERE COALESCE(d.body_text,'')<>''"""
+            )
+            database.executemany(
+                "INSERT INTO documents_fts(rowid,title,body_text,original_url) VALUES(?,?,?,?)",
+                ((int(row[0]), str(row[1] or ''), str(row[2] or ''), str(row[3] or row[4] or '')) for row in rows),
+            )
     except Exception:
         database.execute("INSERT OR REPLACE INTO project_meta(key,value) VALUES('fts5','0')")

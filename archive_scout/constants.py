@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-VERSION = "1.0.5"
-SCHEMA_VERSION = 7
+VERSION = "1.0.6"
+SCHEMA_VERSION = 8
 APP_NAME = "Archive Scout"
 CDX_URL = "https://web.archive.org/cdx/search/cdx"
 CDX_TIMEMAP_URL = "https://web.archive.org/web/timemap/cdx"
@@ -11,7 +11,7 @@ REPLAY_URL = "https://web.archive.org/web"
 RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 TEXT_EXTENSIONS = {
     ".asp", ".aspx", ".cfm", ".cgi", ".css", ".dat", ".dhtm", ".htm", ".html", ".inc",
-    ".js", ".json", ".jsp", ".phtm", ".php", ".shtm", ".shtml", ".text", ".txt",
+    ".js", ".json", ".jsp", ".dhtml", ".phtml", ".phtm", ".php", ".php3", ".php4", ".php5", ".shtm", ".shtml", ".text", ".txt",
     ".xhtm", ".xhtml", ".xml"
 }
 IMAGE_EXTENSIONS = {
@@ -33,7 +33,7 @@ BINARY_EXTENSIONS = MEDIA_EXTENSIONS | AUDIO_EXTENSIONS | {
     ".torrent", ".xls", ".xlsx", ".zip"
 }
 ARCHIVE_EXTENSIONS = {".7z", ".ace", ".cab", ".gz", ".rar", ".tar", ".tgz", ".zip"}
-DEFAULT_IMAGE_EXTENSIONS = sorted(IMAGE_EXTENSIONS - {".svg", ".ico", ".heic", ".heif", ".jxl"})
+DEFAULT_IMAGE_EXTENSIONS = sorted(IMAGE_EXTENSIONS - {".ico", ".heic", ".heif", ".jxl"})
 DEFAULT_VIDEO_EXTENSIONS = sorted(VIDEO_EXTENSIONS)
 REVIEW_STATUSES = (
     "unreviewed", "relevant", "possibly_relevant", "false_positive", "duplicate", "dead_end", "needs_follow_up"
@@ -60,6 +60,8 @@ OPERATION_MODES = {
     "Build or refresh Research Intelligence": "research_index",
     "Rebuild forum threads only": "forum_rebuild",
     "Merge another Archive Scout project": "merge_project",
+    "Search with Hitlist": "hitlist",
+    "Compact project storage": "compact",
 }
 SCOPE_LABELS = {
     "All archived text pages (thorough)": "all_text",

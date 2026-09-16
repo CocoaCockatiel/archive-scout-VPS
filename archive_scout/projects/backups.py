@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import shutil
 import sqlite3
 from datetime import datetime, timezone
@@ -13,23 +14,29 @@ def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def create_project_backup(root: Path, reason: str = "manual", keep: int = 5) -> Path:
+def create_project_backup(root: Path, reason: str = "manual", keep: int = 5, max_mb: float = 1024.0) -> Path:
+    """Create a compressed SQLite backup without copying capture/media payloads."""
     root = Path(root)
     source = root / DATABASE_NAME
     if not source.exists():
         raise FileNotFoundError(source)
     backup_dir = root / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
-    destination = backup_dir / f"archive_scout_{_timestamp()}_{reason.replace(' ', '_')}.sqlite3"
+    stem = f"archive_scout_{_timestamp()}_{reason.replace(' ', '_')}"
+    raw = backup_dir / f"{stem}.sqlite3.tmp"
+    destination = backup_dir / f"{stem}.sqlite3.gz"
     source_db = sqlite3.connect(source)
-    destination_db = sqlite3.connect(destination)
+    destination_db = sqlite3.connect(raw)
     try:
         source_db.backup(destination_db)
     finally:
         destination_db.close()
         source_db.close()
+    with raw.open("rb") as src, gzip.open(destination, "wb", compresslevel=6) as dst:
+        shutil.copyfileobj(src, dst, length=1024 * 1024)
+    raw.unlink(missing_ok=True)
     _record_backup(root, destination, reason)
-    prune_backups(root, keep)
+    prune_backups(root, keep, max_mb=max_mb)
     return destination
 
 
@@ -58,13 +65,31 @@ def list_project_backups(root: Path) -> list[Path]:
     backup_dir = Path(root) / "backups"
     if not backup_dir.exists():
         return []
-    return sorted(backup_dir.glob("archive_scout_*.sqlite3"), key=lambda p: p.stat().st_mtime, reverse=True)
+    paths = list(backup_dir.glob("archive_scout_*.sqlite3")) + list(backup_dir.glob("archive_scout_*.sqlite3.gz"))
+    return sorted(paths, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
-def prune_backups(root: Path, keep: int = 5) -> None:
+def prune_backups(root: Path, keep: int = 5, max_mb: float = 1024.0) -> None:
     keep = max(1, int(keep))
-    for path in list_project_backups(root)[keep:]:
-        path.unlink(missing_ok=True)
+    budget = max(64 * 1024 * 1024, int(float(max_mb) * 1024 * 1024))
+    paths = list_project_backups(root)
+    total = 0
+    for index, path in enumerate(paths):
+        size = path.stat().st_size if path.exists() else 0
+        # Always retain the newest backup. Thereafter enforce both count and
+        # aggregate disk budget.
+        if index >= keep or (index > 0 and total + size > budget):
+            path.unlink(missing_ok=True)
+            continue
+        total += size
+
+
+def _materialize_backup(backup_path: Path, destination: Path) -> None:
+    if backup_path.suffix == ".gz":
+        with gzip.open(backup_path, "rb") as src, destination.open("wb") as dst:
+            shutil.copyfileobj(src, dst, length=1024 * 1024)
+    else:
+        shutil.copy2(backup_path, destination)
 
 
 def restore_project_backup(root: Path, backup_path: Path) -> Path:
@@ -79,7 +104,7 @@ def restore_project_backup(root: Path, backup_path: Path) -> Path:
         safety.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(target, safety)
     temp = target.with_suffix(".restore.tmp")
-    shutil.copy2(backup_path, temp)
+    _materialize_backup(backup_path, temp)
     check = sqlite3.connect(temp)
     try:
         result = check.execute("PRAGMA integrity_check").fetchone()

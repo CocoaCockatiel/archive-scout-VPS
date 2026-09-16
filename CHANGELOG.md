@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.6
+
+- Split Wayback replay acquisition from local parsing/scanning so ten replay workers remain focused on retrieval while a separate CPU-oriented scanner pool handles saved captures. Downloaded payloads are checkpointed as `downloaded_unscanned` before analysis, allowing restart/reboot recovery without repeating completed network work.
+- Raised scanning recall: full raw source is searched without the old 500,000-character source truncation; UTF-16/UTF-32 BOMs and legacy charset hints are recognized; JavaScript/JSON hex escapes and markup-split text are searchable; conflicting/weak MIME and extension metadata are sniffed instead of silently discarded; SVG and legacy `.dhtml`, `.phtml`, `.php3`, `.php4`, `.php5` text are supported.
+- Turned native Aho-Corasick into the direct ordinary-literal counter/scorer while retaining regex, case-sensitive, and whole-word paths for advanced rules.
+- Added resumable **Search with Hitlist** for one keyword, pasted lists, or `.txt` hitlists. It searches all indexed URLs and complete locally saved capture contents without research scoring/enrichment and reports explicit coverage.
+- Added schema 8 durable state: explicit capture skip reasons/classifier revision, `local_path`/content metadata, quick-search state/results, and per-page index checkpoints. Completed numbered Timemap pages are not repeated merely because a process stops inside a larger scheduling group.
+- Reworked intentional skips and the Dashboard: known non-text captures and URL-filter exclusions are auditable skip counts rather than Open Errors; transient recovered network/index events remain separate from active failures; changing from URL-keyword-only scope to thorough text mode requeues applicable captures.
+- Standardized new text and media filenames on one portable, recognizable full-URL-derived naming policy with deterministic timestamp/length fallbacks only when needed to prevent collisions or exceed filesystem limits. Existing files are not destructively renamed.
+- Added storage-efficiency work: canonical replay payloads stay on disk instead of duplicating full body text in SQLite, FTS5 uses a contentless token index, exact duplicate files may use safe copy-on-write clones where supported, backups are compressed/budgeted, WAL growth is bounded/checkpointed, and Compact Project can reclaim verified redundant/regenerable storage without deleting unique captures.
+- Added safer partial-download persistence and recovery plus stronger pause/save checkpoints.
+- Kept v1.0.5's Timemap-first `pageSize=9`, ten-worker, ~80-request/minute indexing envelope; v1.0.6 focuses indexing changes on durable per-page completion state rather than replacing the acquisition architecture.
+- On macOS only, the packaged outer product remains `Archive Scout.app` while the inner executable/process identity is `Wayback Machine Downloader` as a best-effort Discord automatic-activity naming change.
+
 ## 1.0.5
 
 - Changed automatic CDX indexing to the fast Timemap numbered-page pipeline: fixed pageSize=9, ten concurrent page workers, Timemap JSON first, and a rolling queue of up to 1,000 pages. Auto mode forces the reference page grouping even when an older saved queue carried a different numbered-page block value.

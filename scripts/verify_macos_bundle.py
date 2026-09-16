@@ -17,7 +17,7 @@ def broken_symlinks(root: Path) -> list[Path]:
     return broken
 
 
-def verify_bundle(app: Path) -> list[str]:
+def verify_bundle(app: Path, expected_executable: str | None = None) -> list[str]:
     errors: list[str] = []
     contents = app / "Contents"
     executable_dir = contents / "MacOS"
@@ -31,6 +31,17 @@ def verify_bundle(app: Path) -> list[str]:
         errors.append(f"missing Contents directory: {contents}")
     if not executable_dir.is_dir() or not any(path.is_file() for path in executable_dir.iterdir() if executable_dir.exists()):
         errors.append(f"missing application executable in {executable_dir}")
+    if expected_executable and not (executable_dir / expected_executable).is_file():
+        errors.append(f"missing expected application executable: {executable_dir / expected_executable}")
+    if expected_executable:
+        try:
+            import plistlib
+            with (contents / "Info.plist").open("rb") as handle:
+                plist = plistlib.load(handle)
+            if plist.get("CFBundleExecutable") != expected_executable:
+                errors.append(f"CFBundleExecutable is {plist.get('CFBundleExecutable')!r}, expected {expected_executable!r}")
+        except Exception as exc:
+            errors.append(f"could not validate Info.plist executable identity: {exc}")
     if not frameworks.is_dir():
         errors.append(f"missing Frameworks directory: {frameworks}")
     if not resources.is_dir():
@@ -50,9 +61,10 @@ def verify_bundle(app: Path) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("app", type=Path)
+    parser.add_argument("--expected-executable", default="")
     args = parser.parse_args()
     app = args.app.expanduser().resolve()
-    errors = verify_bundle(app)
+    errors = verify_bundle(app, args.expected_executable or None)
     if errors:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)

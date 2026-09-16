@@ -8,6 +8,7 @@ from typing import Callable
 
 from ..analysis.duplicates import cluster_duplicates
 from ..config import ProjectConfig
+from ..document_store import document_body
 from ..events import ProgressEvent, Stopped
 from ..utils import utc_now
 from .embeddings import encode_text, vector_bands
@@ -40,7 +41,7 @@ def _emit(callback: Callable[[ProgressEvent], None] | None, event: ProgressEvent
 
 
 def _document_text(row: sqlite3.Row, excerpt_chars: int) -> str:
-    body = str(row["body_text"] or "")
+    body = document_body(row)
     if len(body) > excerpt_chars * 8:
         body = body[: excerpt_chars * 8]
     return "\n".join(part for part in (str(row["title"] or ""), str(row["original_url"] or ""), body) if part)
@@ -78,7 +79,7 @@ def _document_fingerprint(database: sqlite3.Connection) -> str:
     row = database.execute(
         """
         SELECT COUNT(*),COALESCE(MAX(id),0),COALESCE(MAX(updated_at),''),COALESCE(SUM(size_bytes),0)
-        FROM documents WHERE COALESCE(body_text,'')<>''
+        FROM documents
         """
     ).fetchone()
     return "|".join(str(value or "") for value in row)
@@ -220,7 +221,7 @@ def build_research_index(
     config = config.normalized()
     research = config.research.normalized()
     stop_event = stop_event or threading.Event()
-    total = int(database.execute("SELECT COUNT(*) FROM documents WHERE COALESCE(body_text,'')<>''").fetchone()[0])
+    total = int(database.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
     summary = ResearchIndexSummary()
     _emit(callback, ProgressEvent("research_index", f"Building local Research Intelligence index for {total:,} documents…", 0, total))
 
@@ -228,12 +229,12 @@ def build_research_index(
     pending_writes = 0
     rows = database.execute(
         """
-        SELECT d.id,d.title,d.body_text,d.links_json,d.content_hash,c.original_url,c.timestamp,
+        SELECT d.*,c.original_url,c.timestamp,
                rv.content_hash AS research_content_hash,rv.backend AS research_backend,rv.dimensions AS research_dimensions
         FROM documents d
         JOIN captures c ON c.id=d.capture_id
         LEFT JOIN research_vectors rv ON rv.document_id=d.id
-        WHERE COALESCE(d.body_text,'')<>'' ORDER BY d.id
+        ORDER BY d.id
         """
     )
     for row in rows:
@@ -276,7 +277,7 @@ def build_research_index(
             )
             if research.entity_extraction:
                 entities = extract_entities(
-                    str(row["title"] or ""), str(row["body_text"] or ""), str(row["original_url"] or ""), links
+                    str(row["title"] or ""), document_body(row), str(row["original_url"] or ""), links
                 )
                 summary.entities += _replace_entities(database, document_id, entities)
             summary.indexed += 1
@@ -303,7 +304,7 @@ def build_research_index(
         SELECT COUNT(*)
         FROM research_vectors rv
         LEFT JOIN documents d ON d.id=rv.document_id
-        WHERE d.id IS NULL OR COALESCE(d.body_text,'')=''
+        WHERE d.id IS NULL
         """
     ).fetchone()[0])
     if summary.removed:
@@ -315,7 +316,7 @@ def build_research_index(
                     SELECT rde.document_id
                     FROM research_document_entities rde
                     LEFT JOIN documents d ON d.id=rde.document_id
-                    WHERE d.id IS NULL OR COALESCE(d.body_text,'')=''
+                    WHERE d.id IS NULL
                 )
                 """
             )
@@ -326,7 +327,7 @@ def build_research_index(
                     SELECT rv.document_id
                     FROM research_vectors rv
                     LEFT JOIN documents d ON d.id=rv.document_id
-                    WHERE d.id IS NULL OR COALESCE(d.body_text,'')=''
+                    WHERE d.id IS NULL
                 )
                 """
             )

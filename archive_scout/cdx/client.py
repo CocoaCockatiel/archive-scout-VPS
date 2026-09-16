@@ -341,7 +341,12 @@ class HttpClient:
 
         while True:
             ensure_frozen_bundle_available()
-            destination.unlink(missing_ok=True)
+            existing_size = destination.stat().st_size if destination.exists() else 0
+            request_headers = dict(headers)
+            if existing_size > 0:
+                request_headers["Range"] = f"bytes={existing_size}-"
+                # Range offsets apply to the identity representation.
+                request_headers["Accept-Encoding"] = "identity"
             permit = self.host_gate.acquire_request(self.stop_event)
             try:
                 with self.limiter.slot(self.stop_event):
@@ -349,7 +354,7 @@ class HttpClient:
                         self.host_gate.finish_request(permit, recovered=False)
                         continue
                     response = self.transport.download(
-                        url, headers, destination, max_bytes, self.stop_event
+                        url, request_headers, destination, max_bytes, self.stop_event
                     )
                 status = int(response.status)
                 retry_after_header = response.headers.get("retry-after") or response.headers.get("Retry-After")
@@ -398,18 +403,23 @@ class HttpClient:
                     "backend": response.backend,
                     "elapsed": response.elapsed,
                 }
-            except (RateLimitDeferred, Stopped):
+            except RateLimitDeferred:
                 destination.unlink(missing_ok=True)
                 self.host_gate.finish_request(permit, recovered=False)
                 raise
+            except Stopped:
+                self.host_gate.finish_request(permit, recovered=False)
+                raise
             except RuntimeError as exc:
-                destination.unlink(missing_ok=True)
                 self.host_gate.finish_request(permit, recovered=False)
                 if isinstance(exc, TransientRequestError):
                     raise
                 if is_missing_frozen_bundle_error(exc):
+                    destination.unlink(missing_ok=True)
                     raise frozen_bundle_error_from_exception(exc) from exc
                 if isinstance(exc, TransportExhaustedError):
+                    # Preserve any bytes already streamed to the .part file. A
+                    # retry (or the next application run) can request the rest.
                     timed_out = is_timeout_error(exc)
                     read_timed_out = bool(getattr(exc, "read_timed_out", False))
                     generic_attempt += 1
@@ -422,11 +432,14 @@ class HttpClient:
                         ) from exc
                     self.retry_wait(generic_attempt - 1, "read timeout" if timed_out else str(exc))
                     continue
+                # Local validation failures (for example max-size rejection) are
+                # not valid resume state.
+                destination.unlink(missing_ok=True)
                 raise
             except (httpx.HTTPError, urllib3.exceptions.HTTPError, TimeoutError, OSError) as exc:
-                destination.unlink(missing_ok=True)
                 self.host_gate.finish_request(permit, recovered=False)
                 if is_missing_frozen_bundle_error(exc):
+                    destination.unlink(missing_ok=True)
                     raise frozen_bundle_error_from_exception(exc) from exc
                 timed_out = is_timeout_error(exc)
                 read_timed_out = is_transport_read_timeout(exc)

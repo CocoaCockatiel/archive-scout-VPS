@@ -1,3 +1,54 @@
+# Archive Scout 1.0.6
+
+Archive Scout 1.0.6 is the maximum-recall, durable-resume, and storage-efficiency release. It keeps the fast Timemap acquisition model from 1.0.5 while separating replay downloading from local analysis so network throughput is no longer tied to HTML parsing and scoring.
+
+## Maximum-recall scanning
+
+- The complete raw source is searchable; the previous 500,000-character source cutoff is removed.
+- Saved replay payloads are preserved as canonical bytes so future rescans can use improved decoding without another Wayback request.
+- UTF-16/UTF-32 BOMs, declared/meta charsets, common legacy fallbacks, HTML entities, URL escapes, JavaScript/JSON hex escapes, raw markup, visible text, compact markup-split text, title, URL, and extracted links are covered.
+- MIME type and filename extension are treated as evidence rather than an absolute verdict. Conflicting, extensionless, unknown, and generic octet-stream cases are downloaded/sniffed instead of being silently discarded when ambiguous.
+- Ordinary case-insensitive literal rules use the native Aho-Corasick match spans directly; advanced regex/case-sensitive/whole-word rules retain their dedicated paths.
+
+## Durable replay and resume
+
+- Replay downloads and scanning are separate stages. A completed file is persisted and checkpointed as `downloaded_unscanned` before local analysis starts.
+- Scanner workers are independent from the ten replay workers.
+- Interrupted `downloading` and `scanning` states recover safely on startup, completed files are reused, and valid `.part` files are preserved for retry/resume where supported.
+- Numbered Timemap pages have durable completion records so a reboot does not require replaying already committed pages in the current scheduling group.
+
+## Search with Hitlist
+
+A new resumable Search with Hitlist mode accepts one keyword, pasted newline-separated terms, or a `.txt` hitlist. It searches indexed URLs and locally downloaded capture contents with the lightweight literal engine and reports exact coverage rather than implying that undownloaded bodies were searched. It intentionally omits research scoring, proximity, AI, and expensive enrichment.
+
+## Storage efficiency
+
+- Canonical capture files are authoritative; new documents no longer keep a second full visible-body copy in SQLite when the local capture exists.
+- FTS5 is maintained as a contentless inverted index rather than another text corpus.
+- Exact duplicate payloads can be replaced with safe copy-on-write clones on supported filesystems without hard-linking mutable user files.
+- Automatic backups are compressed and bounded by both retention count and storage budget.
+- WAL size is bounded/checkpointed, and Compact Project can reclaim redundant legacy body caches and other verified regenerable data without deleting unique capture/media payloads.
+
+## Auditability and filenames
+
+- Intentional non-text and URL-filter skips no longer inflate Open Errors. Skip reasons and classifier revision are persisted and can be reevaluated after configuration/classifier changes.
+- The Dashboard separates active errors, recovery/network events, non-text skips, URL-filter skips, other intentional skips, pending downloads, and downloaded-but-unscanned captures.
+- New text, image, and video captures use the same recognizable portable filename derived from the full original URL. Query information is preserved; deterministic timestamp/hash suffixes are used only when required for collision/length safety. Existing archives are not destructively renamed.
+
+## Indexing and macOS
+
+- v1.0.5's Timemap-first automatic profile remains: `pageSize=9`, ten bounded page workers, 0.75-second shared CDX spacing, rolling scheduling up to 1,000 pages, with resume-key/subdivision fallbacks.
+- The macOS outer bundle remains `Archive Scout.app`, while its inner executable/process identity is `Wayback Machine Downloader` as a best-effort Discord automatic activity-name change. No Rich Presence dependency is added.
+
+## Compatibility
+
+- Public version: 1.0.6.
+- Database schema: 8.
+- Migration from supported v1.0.x schemas is automatic and non-destructive.
+- Existing downloaded files remain usable and are not mass-renamed.
+
+---
+
 # Archive Scout 1.0.5
 
 Archive Scout 1.0.5 focuses on acquisition speed during the indexing phase and simplifies media storage. Automatic CDX indexing now mirrors the reference downloader's proven Timemap architecture while retaining Archive Scout's persistent queues, database safety, recovery circuits, and resume fallback.

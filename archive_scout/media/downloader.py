@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import concurrent.futures
-import hashlib
 import os
-import re
 import sqlite3
 import threading
 import time
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urlsplit
 
 from ..cdx.client import HttpClient, RateLimitDeferred
 from ..config import ProjectConfig
@@ -20,48 +17,25 @@ from ..downloads.validation import classify_exception
 from ..content import classify_replay_content
 from ..events import ProgressEvent, Stopped
 from ..site_status import host_from_url, should_surface_site_issue, site_issue_message
+from ..storage import url_filename, media_path as storage_media_path, sha256_file, deduplicate_exact_file
 from ..utils import utc_now
 from .indexer import media_query_signature
 
-INVALID_COMPONENT = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-
-
-def _platform_filename(value: str, fallback: str) -> str:
-    """Preserve the URL filename verbatim whenever the filesystem permits it.
-
-    URL path segments are normally already percent-escaped, so the common case
-    needs no rewriting at all. Only characters that cannot be represented as one
-    portable filename are percent-escaped instead of being replaced with opaque
-    ids/timestamps.
-    """
-    value = (value or fallback).strip()
-    if not value:
-        value = fallback
-    out: list[str] = []
-    for char in value:
-        if INVALID_COMPONENT.fullmatch(char) or ord(char) < 32:
-            out.append(f"%{ord(char):02X}")
-        else:
-            out.append(char)
-    result = "".join(out).rstrip(" .")
-    return result or fallback
-
-
 def media_filename(original_url: str, extension: str = "") -> str:
-    parsed = urlsplit(original_url)
-    # Keep the raw URL spelling (including percent escapes) rather than unquoting
-    # it, so photo%20one.jpg remains photo%20one.jpg on disk.
-    raw_name = (parsed.path or "").rsplit("/", 1)[-1]
-    fallback = "media" + (extension or "")
-    return _platform_filename(raw_name, fallback)
+    del extension
+    return url_filename(original_url, "media")
 
 
-def media_path(root: Path, row: sqlite3.Row, preserve_paths: bool = False) -> Path:
-    del preserve_paths  # v1.0.5 media layout is deliberately fixed and flat.
-    folder = "images" if str(row["media_kind"]).casefold() == "image" else "videos"
-    filename = media_filename(str(row["original_url"]), str(row["extension"] or ""))
-    return root / "media" / folder / filename
-
+def media_path(root: Path, row: sqlite3.Row, preserve_paths: bool = False, *, disambiguate: bool = False) -> Path:
+    del preserve_paths
+    try:
+        timestamp = str(row["timestamp"] or "")
+    except (KeyError, IndexError):
+        timestamp = ""
+    return storage_media_path(
+        root, str(row["media_kind"]), str(row["original_url"]), timestamp,
+        disambiguate=disambiguate,
+    )
 
 def media_replay_url(row: sqlite3.Row) -> str:
     modifier = "oe_" if str(row["extension"] or "").casefold() == ".swf" else "if_"
@@ -69,17 +43,11 @@ def media_replay_url(row: sqlite3.Row) -> str:
 
 
 def _hash_existing(path: Path) -> tuple[int, str]:
-    digest = hashlib.sha256()
-    size = 0
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            size += len(chunk)
-            digest.update(chunk)
-    return size, digest.hexdigest()
+    return sha256_file(path)
 
 
 def fetch_media(row: sqlite3.Row, config: ProjectConfig, client: HttpClient) -> dict:
-    path = media_path(config.output_dir, row)
+    path = media_path(config.output_dir, row, disambiguate=(config.media.snapshot_strategy == "all"))
     path.parent.mkdir(parents=True, exist_ok=True)
     # Match the fast downloader's preflight: an exact destination that already
     # exists is treated as downloaded and is not fetched again.
@@ -301,9 +269,23 @@ def download_media(
                     row = futures.pop(future)
                     try:
                         result = future.result()
+                        storage_method = "file"
+                        if config.compact_storage:
+                            existing = database.execute(
+                                "SELECT path FROM media_captures WHERE id<>? AND content_hash=? AND path IS NOT NULL LIMIT 1",
+                                (int(result["id"]), str(result["hash"])),
+                            ).fetchone()
+                            if existing and Path(str(existing["path"])).is_file():
+                                storage_method = deduplicate_exact_file(Path(result["path"]), Path(str(existing["path"])))
                         with database:
                             save_media_success(
                                 database, result["id"], result["path"], result["bytes"], result["hash"], result["status"], result["final_url"]
+                            )
+                            database.execute(
+                                """INSERT INTO storage_objects(content_hash,canonical_path,size_bytes,reference_count,storage_method,updated_at)
+                                   VALUES(?,?,?,?,?,?)
+                                   ON CONFLICT(content_hash) DO UPDATE SET reference_count=storage_objects.reference_count+1,updated_at=excluded.updated_at""",
+                                (str(result["hash"]), str(result["path"]), int(result["bytes"]), 1, storage_method, utc_now()),
                             )
                     except RateLimitDeferred:
                         stop_event.set()

@@ -4,6 +4,7 @@ import sqlite3
 from pathlib import Path
 from typing import Callable
 
+from ..document_store import document_body
 from ..events import ProgressEvent
 from ..projects.backups import create_project_backup
 from ..utils import atomic_write_text, utc_now
@@ -13,10 +14,11 @@ def rebuild_full_text_index(database: sqlite3.Connection, batch_size: int = 500)
     enabled = database.execute("SELECT value FROM project_meta WHERE key='fts5'").fetchone()
     if not enabled or enabled[0] != "1":
         return 0
-    database.execute("DELETE FROM documents_fts")
+    database.execute("DROP TABLE IF EXISTS documents_fts")
+    database.execute("CREATE VIRTUAL TABLE documents_fts USING fts5(title,body_text,original_url,content='documents',content_rowid='id')")
     cursor = database.execute(
         """
-        SELECT d.id,d.title,d.body_text,c.original_url
+        SELECT d.*,c.original_url AS capture_original_url
         FROM documents d JOIN captures c ON c.id=d.capture_id ORDER BY d.id
         """
     )
@@ -28,7 +30,7 @@ def rebuild_full_text_index(database: sqlite3.Connection, batch_size: int = 500)
         database.executemany(
             "INSERT INTO documents_fts(rowid,title,body_text,original_url) VALUES(?,?,?,?)",
             (
-                (row["id"], row["title"] or "", row["body_text"] or "", row["original_url"] or "")
+                (row["id"], row["title"] or "", document_body(row), row["capture_original_url"] or "")
                 for row in rows
             ),
         )
@@ -42,9 +44,10 @@ def repair_project(
     callback: Callable[[ProgressEvent], None] | None = None,
     *,
     keep_backups: int = 5,
+    backup_max_mb: float = 1024.0,
 ) -> Path:
     root = Path(root)
-    backup = create_project_backup(root, reason="before_repair", keep=keep_backups)
+    backup = create_project_backup(root, reason="before_repair", keep=keep_backups, max_mb=backup_max_mb)
     actions: list[str] = [f"Backup created: {backup}"]
     if callback:
         callback(ProgressEvent("repair", "Created a safety backup before repair."))
@@ -56,6 +59,7 @@ def repair_project(
 
     with database:
         capture_reset = database.execute("UPDATE captures SET state='pending' WHERE state='downloading'").rowcount
+        scan_capture_reset = database.execute("UPDATE captures SET state='downloaded_unscanned' WHERE state='scanning'").rowcount
         media_reset = database.execute("UPDATE media_captures SET state='pending' WHERE state='downloading'").rowcount
         scan_reset = database.execute("UPDATE scan_runs SET status='interrupted' WHERE status='running'").rowcount
         operation_reset = database.execute(
@@ -88,13 +92,11 @@ def repair_project(
         rebuilt = rebuild_full_text_index(database)
         database.execute("INSERT INTO repair_actions(action,details,created_at) VALUES(?,?,?)", ("repair", f"capture_reset={capture_reset}; media_reset={media_reset}; missing={missing}; fts={rebuilt}", utc_now()))
 
-    removed_parts = 0
+    retained_parts = 0
     for folder in (root / "captures", root / "media"):
-        if not folder.exists():
-            continue
-        for path in folder.rglob("*.part"):
-            path.unlink(missing_ok=True)
-            removed_parts += 1
+        if folder.exists():
+            retained_parts += sum(1 for path in folder.rglob("*.part") if path.is_file())
+
 
     database.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     database.execute("PRAGMA optimize")
@@ -107,7 +109,7 @@ def repair_project(
             f"Operation runs marked interrupted: {operation_reset}",
             f"Missing or empty documents queued for redownload: {missing}",
             f"Full-text rows rebuilt: {rebuilt}",
-            f"Temporary .part files removed: {removed_parts}",
+            f"Resumable .part files retained: {retained_parts}",
             "WAL checkpoint and SQLite optimize completed",
         ]
     )

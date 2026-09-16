@@ -90,8 +90,8 @@ class V105ReleaseTests(unittest.TestCase):
             'original_url': 'http://example.com/media/clip.mp4',
             'media_kind': 'video', 'extension': '.mp4',
         }
-        self.assertEqual(media_path(root, image), root / 'media' / 'images' / 'photo%20one.jpg')
-        self.assertEqual(media_path(root, video), root / 'media' / 'videos' / 'clip.mp4')
+        self.assertEqual(media_path(root, image), root / 'media' / 'images' / 'http%3A%2F%2Fexample.com%2Fgallery%2Fphoto%20one.jpg')
+        self.assertEqual(media_path(root, video), root / 'media' / 'videos' / 'http%3A%2F%2Fexample.com%2Fmedia%2Fclip.mp4')
         self.assertEqual(len(media_path(root, image).relative_to(root / 'media').parts), 2)
         self.assertEqual(len(media_path(root, video).relative_to(root / 'media').parts), 2)
 

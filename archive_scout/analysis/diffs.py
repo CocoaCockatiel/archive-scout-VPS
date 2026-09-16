@@ -6,6 +6,7 @@ import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
 
+from ..document_store import document_body
 from ..scanning.automaton import LiteralAutomaton
 from ..utils import clean_space, utc_now
 
@@ -43,7 +44,7 @@ def compare_snapshots(database: sqlite3.Connection) -> DiffSummary:
         database.execute("DELETE FROM snapshot_diffs")
         for row in database.execute(
             """
-            SELECT c.id AS capture_id,c.original_url,c.timestamp,d.body_text,d.normalized_hash
+            SELECT d.*,c.id AS capture_id,c.original_url,c.timestamp
             FROM captures c JOIN documents d ON d.id=c.document_id
             WHERE c.state='downloaded'
             ORDER BY c.original_url,c.timestamp,c.id
@@ -55,12 +56,12 @@ def compare_snapshots(database: sqlite3.Connection) -> DiffSummary:
                 if previous_hash and previous_hash == current_hash:
                     result = {
                         "similarity": 1.0,
-                        "earlier_chars": len(str(previous["body_text"] or "")),
-                        "later_chars": len(str(row["body_text"] or "")),
+                        "earlier_chars": len(document_body(previous)),
+                        "later_chars": len(document_body(row)),
                         "added_lines": [], "removed_lines": [], "added_count": 0, "removed_count": 0,
                     }
                 else:
-                    result = _summary(str(previous["body_text"] or ""), str(row["body_text"] or ""))
+                    result = _summary(document_body(previous), document_body(row))
                 database.execute(
                     """
                     INSERT INTO snapshot_diffs(earlier_capture_id,later_capture_id,summary_json,created_at)
@@ -117,7 +118,7 @@ def build_first_appearances(database: sqlite3.Connection, queries: list[str]) ->
         matches: dict[str, tuple[sqlite3.Row, sqlite3.Row]] = {}
         for row in database.execute(
             """
-            SELECT c.id AS capture_id,c.original_url,c.timestamp,d.title,d.body_text,d.links_json
+            SELECT d.*,c.id AS capture_id,c.original_url,c.timestamp
             FROM captures c JOIN documents d ON d.id=c.document_id
             ORDER BY c.original_url,c.timestamp,c.id
             """
@@ -128,7 +129,7 @@ def build_first_appearances(database: sqlite3.Connection, queries: list[str]) ->
                 matches.clear()
             current_url = original_url
             haystack = " ".join(
-                (str(row["title"] or ""), str(row["body_text"] or ""), str(row["links_json"] or ""))
+                (str(row["title"] or ""), document_body(row), str(row["links_json"] or ""))
             ).casefold()
             for needle in automaton.find(haystack):
                 for query in needle_queries.get(needle, ()):
