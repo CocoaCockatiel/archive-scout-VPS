@@ -7,7 +7,7 @@ from typing import Callable
 
 from ..document_store import compress_text, document_body
 from ..events import ProgressEvent, Stopped
-from ..storage import deduplicate_exact_file
+from ..storage import deduplicate_exact_file, sha256_file
 from ..utils import utc_now
 
 
@@ -55,10 +55,13 @@ def compact_project_storage(
     compacted_docs = 0
     dedupe_saved = 0
 
+    document_text_total = int(database.execute(
+        "SELECT COUNT(*) FROM documents WHERE COALESCE(body_text,'')<>''"
+    ).fetchone()[0])
     rows = database.execute(
         """SELECT d.*,c.original_url FROM documents d JOIN captures c ON c.id=d.capture_id
            WHERE COALESCE(d.body_text,'')<>'' ORDER BY d.id"""
-    ).fetchall()
+    )
     for index, row in enumerate(rows, 1):
         if stop_event.is_set():
             raise Stopped
@@ -73,7 +76,10 @@ def compact_project_storage(
             )
         compacted_docs += 1
         if callback and index % 250 == 0:
-            callback(ProgressEvent('compact', f'Compressed database text {index:,}/{len(rows):,}', index, len(rows)))
+            callback(ProgressEvent(
+                'compact', f'Compressed database text {index:,}/{document_text_total:,}',
+                index, document_text_total,
+            ))
 
     # v1.0.5 and earlier duplicated every match's hit counts/fields in both
     # document_matches JSON and keyword_hits. v1.0.6 reads the canonical JSON
@@ -83,8 +89,41 @@ def compact_project_storage(
         with database:
             database.execute("DELETE FROM keyword_hits")
 
-    # Exact-byte duplicates: capture text and media are safe to CoW-clone.
+    # Acquisition-only intentionally defers SHA-256 so downloading spends CPU on
+    # network/TLS rather than optional storage analysis. Compact Project is the
+    # explicit maintenance boundary that backfills those hashes and can then
+    # CoW-deduplicate exact raw captures without deleting any unique payload.
+    capture_hashes_backfilled = 0
+    capture_hash_cursor = database.execute(
+        """SELECT id,local_path FROM captures
+           WHERE COALESCE(local_path,'')<>'' AND COALESCE(content_hash,'')=''
+             AND state IN ('downloaded_unscanned','downloaded') ORDER BY id"""
+    )
+    for row in capture_hash_cursor:
+        if stop_event.is_set():
+            raise Stopped
+        path = Path(str(row['local_path'] or ''))
+        if not path.is_file():
+            continue
+        _size, digest = sha256_file(path)
+        database.execute(
+            "UPDATE captures SET content_hash=?,updated_at=? WHERE id=?",
+            (digest, utc_now(), int(row['id'])),
+        )
+        capture_hashes_backfilled += 1
+        if capture_hashes_backfilled % 250 == 0:
+            database.commit()
+            if callback:
+                callback(ProgressEvent(
+                    'compact', f'Hashed {capture_hashes_backfilled:,} acquisition-only captures'
+                ))
+    database.commit()
+
+    # Exact-byte duplicates: raw captures, scanned documents, and media are safe
+    # to CoW-clone. Raw capture hashing above makes download-only projects fully
+    # eligible for the same storage optimization after acquisition completes.
     for table, hash_col, path_col in (
+        ('captures', 'content_hash', 'local_path'),
         ('documents', 'content_hash', 'path'),
         ('media_captures', 'content_hash', 'path'),
     ):
@@ -125,6 +164,7 @@ def compact_project_storage(
     after_db = (root / 'archive_scout.sqlite3').stat().st_size if (root / 'archive_scout.sqlite3').exists() else 0
     result = {
         'documents_compacted': compacted_docs,
+        'capture_hashes_backfilled': capture_hashes_backfilled,
         'redundant_keyword_hit_rows_removed': legacy_keyword_hit_rows,
         'database_bytes_before': before_db,
         'database_bytes_after': after_db,

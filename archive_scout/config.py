@@ -498,7 +498,7 @@ def load_project_config(path: Path) -> ProjectConfig:
     # in flight using the historical pageSize=9 grouping. Upgrade only the
     # untouched v1.0.4 automatic indexing profile.
     if (
-        saved_version != "1.0.6.2"
+        saved_version not in {"1.0.6.2", "1.0.6.3"}
         and loaded_page_size == 100000
         and loaded_cdx_delay == 0.75
         and loaded_page_blocks == 0

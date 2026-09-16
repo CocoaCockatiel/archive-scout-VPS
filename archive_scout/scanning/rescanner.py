@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import json
 import os
 import sqlite3
@@ -12,7 +13,6 @@ from ..content import decode_bytes, parse_page
 from ..database.repositories import record_error, resolve_errors, save_match, upsert_document
 from ..events import ProgressEvent, Stopped
 from ..document_store import document_body, document_links
-from ..storage import sha256_file
 from ..utils import hash_text, normalize_search
 from .jobs import ScanJob
 from .scoring import analyze_content, prepare_analysis_fields
@@ -24,9 +24,13 @@ def _analyze_saved_document(row: dict[str, object], jobs: list[ScanJob]) -> dict
         return {"kind": "missing", "row": row, "path": path}
     try:
         data = path.read_bytes()
-        _size_on_disk, content_hash = sha256_file(path)
+        content_hash = hashlib.sha256(data).hexdigest()
         document_changed = content_hash != str(row.get("content_hash") or "")
         raw = decode_bytes(data, str(row.get("mimetype") or ""))
+        # Avoid retaining both raw bytes and decoded text during the expensive
+        # parse/normalization/scoring phase. Hashing the in-memory bytes also
+        # removes the old second full disk read of every rescanned capture.
+        del data
         if not document_changed:
             try:
                 title = str(row.get("title") or "")

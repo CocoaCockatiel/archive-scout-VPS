@@ -483,12 +483,30 @@ class ArchiveScoutApp(tk.Tk):
         try:
             selected = self.notebook.tab(self.notebook.select(), "text") if self.notebook.select() else ""
             active = bool(self.worker_thread and self.worker_thread.is_alive())
-            if active or selected == "Dashboard":
+            # Exact COUNT(*) dashboard queries are deliberately suspended while
+            # an operation owns the project database. Large projects can contain
+            # millions of capture/match/error rows; recounting them every second
+            # steals page cache and I/O from acquisition/scanning without adding
+            # useful precision. Live operation counters arrive through ProgressEvent.
+            if not active and selected == "Dashboard":
                 self.refresh_dashboard()
-            interval = 1000 if active else (1500 if selected == "Dashboard" else 5000)
+                interval = 5000
+            elif active:
+                interval = 1000
+            else:
+                interval = 15000
             self.dashboard_refresh_job = self.after(interval, self.dashboard_refresh_loop)
         except tk.TclError:
             self.dashboard_refresh_job = None
+
+    def update_dashboard_from_progress(self, event: ProgressEvent) -> None:
+        detail = dict(event.detail or {})
+        if "pending" in detail:
+            self.dashboard_pending_var.set(f"{int(detail['pending'] or 0):,}")
+        if "downloaded_unscanned" in detail:
+            self.dashboard_waiting_scan_var.set(f"{int(detail['downloaded_unscanned'] or 0):,}")
+        elif "scan_backlog" in detail:
+            self.dashboard_waiting_scan_var.set(f"{int(detail['scan_backlog'] or 0):,}")
 
     def refresh_dashboard(self) -> None:
         root = Path(self.output_var.get()).expanduser()
@@ -1431,6 +1449,7 @@ class ArchiveScoutApp(tk.Tk):
             if hasattr(self, name):
                 getattr(self, name).configure(state="disabled")
         self.stop_button.configure(state="normal")
+        self.refresh_dashboard()
         self.log(f"Starting {mode} in {config.output_dir}")
         self.worker_thread = threading.Thread(target=self.run_worker, args=(config, mode), daemon=True)
         self.worker_thread.start()
@@ -1464,6 +1483,7 @@ class ArchiveScoutApp(tk.Tk):
                 if kind == "progress":
                     event = payload
                     self.status_var.set(event.message)
+                    self.update_dashboard_from_progress(event)
                     self.log(event.message)
                     if event.current is not None and event.total:
                         self.progress.configure(mode="determinate")
@@ -1479,6 +1499,7 @@ class ArchiveScoutApp(tk.Tk):
                     self.status_var.set("Complete")
                     self.log("Complete. Reports are ready.")
                     self.finish_run()
+                    self.refresh_dashboard()
                     self.refresh_history()
                     self.refresh_results()
                     self.refresh_errors()
@@ -1513,11 +1534,13 @@ class ArchiveScoutApp(tk.Tk):
                     self.progress.stop()
                     self.status_var.set("Stopped. Progress was saved.")
                     self.finish_run()
+                    self.refresh_dashboard()
                 elif kind == "deferred":
                     self.progress.stop()
                     self.status_var.set("Paused safely because Wayback is unreachable. Progress was saved.")
                     self.log(str(payload))
                     self.finish_run()
+                    self.refresh_dashboard()
                     messagebox.showinfo(
                         APP_NAME,
                         "Archive Scout could not obtain a stable Wayback connection after trying the available connection methods. "
@@ -1528,6 +1551,7 @@ class ArchiveScoutApp(tk.Tk):
                     self.status_var.set("Error")
                     self.log(str(payload))
                     self.finish_run()
+                    self.refresh_dashboard()
                     messagebox.showerror(APP_NAME, str(payload))
         except queue.Empty:
             pass

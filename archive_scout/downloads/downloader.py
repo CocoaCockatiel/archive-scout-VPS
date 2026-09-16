@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import os
 import sqlite3
 import threading
@@ -210,6 +211,116 @@ def prepare_download_rows(
     return total, iter_rows()
 
 
+def prepare_download_only_rows(
+    database: sqlite3.Connection,
+    config: ProjectConfig,
+    states: tuple[str, ...] = ("pending",),
+    capture_ids: list[int] | None = None,
+) -> tuple[int, Iterator[sqlite3.Row], dict[str, int]]:
+    """Stream download-only candidates without materializing a temporary queue.
+
+    The normal scan pipeline keeps its priority queue because it coordinates two
+    local stages. Acquisition-only can use the existing composite capture index
+    directly: known-size captures first, then unknown-size captures. Metadata
+    classification is performed in bounded 2,000-row pages and intentional
+    binary skips are persisted in batches. This starts replay work with no
+    project-sized INSERT/DELETE churn in a temporary SQLite table.
+    """
+    requeue_reclassifiable_skips(database, "all_text", CLASSIFIER_REVISION)
+    database.execute("DROP TABLE IF EXISTS temp.archive_scout_capture_selection")
+    source = "captures c"
+    clauses: list[str] = []
+    params: list[object] = []
+    if capture_ids:
+        database.execute(
+            "CREATE TEMP TABLE archive_scout_capture_selection(id INTEGER PRIMARY KEY) WITHOUT ROWID"
+        )
+        database.executemany(
+            "INSERT OR IGNORE INTO archive_scout_capture_selection(id) VALUES(?)",
+            ((int(value),) for value in capture_ids),
+        )
+        source += " JOIN archive_scout_capture_selection s ON s.id=c.id"
+    else:
+        clauses.extend(["c.query_signature=?", "c.download_attempts<?"])
+        params.extend([cdx_query_signature(config), config.max_attempts])
+    if states:
+        clauses.append("c.state IN (" + ",".join("?" for _ in states) + ")")
+        params.extend(states)
+    base_where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    total = int(database.execute(
+        "SELECT COUNT(*) FROM " + source + base_where, params
+    ).fetchone()[0])
+    stats = {"metadata_skipped": 0}
+
+    def classify_batch(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
+        selected: list[sqlite3.Row] = []
+        skipped_ids: list[int] = []
+        for row in rows:
+            if classify_text_candidate(
+                str(row["original_url"]), str(row["mimetype"] or "")
+            ) == "binary":
+                skipped_ids.append(int(row["id"]))
+            else:
+                selected.append(row)
+        if skipped_ids:
+            now = utc_now()
+            with database:
+                database.executemany(
+                    """UPDATE captures SET state='skipped',skip_reason='known_non_text',
+                       classifier_revision=?,updated_at=? WHERE id=?""",
+                    ((CLASSIFIER_REVISION, now, capture_id) for capture_id in skipped_ids),
+                )
+            stats["metadata_skipped"] += len(skipped_ids)
+        return selected
+
+    def iter_rows() -> Iterator[sqlite3.Row]:
+        if capture_ids:
+            last_id = 0
+            while True:
+                where = base_where + (" AND " if base_where else " WHERE ") + "c.id>?"
+                rows = database.execute(
+                    "SELECT c.* FROM " + source + where + " ORDER BY c.id LIMIT 2000",
+                    [*params, last_id],
+                ).fetchall()
+                if not rows:
+                    return
+                last_id = int(rows[-1]["id"])
+                yield from classify_batch(rows)
+            return
+
+        # The captures_download_length_idx index supports this directly without
+        # constructing a second project-sized queue table.
+        last_length = -1
+        last_id = 0
+        while True:
+            where = base_where + (" AND " if base_where else " WHERE ")
+            where += "COALESCE(c.length,0)>0 AND (c.length,c.id)>(?,?)"
+            rows = database.execute(
+                "SELECT c.* FROM " + source + where + " ORDER BY c.length,c.id LIMIT 2000",
+                [*params, last_length, last_id],
+            ).fetchall()
+            if not rows:
+                break
+            last_length = max(0, int(rows[-1]["length"] or 0))
+            last_id = int(rows[-1]["id"])
+            yield from classify_batch(rows)
+
+        last_id = 0
+        while True:
+            where = base_where + (" AND " if base_where else " WHERE ")
+            where += "COALESCE(c.length,0)<=0 AND c.id>?"
+            rows = database.execute(
+                "SELECT c.* FROM " + source + where + " ORDER BY c.id LIMIT 2000",
+                [*params, last_id],
+            ).fetchall()
+            if not rows:
+                break
+            last_id = int(rows[-1]["id"])
+            yield from classify_batch(rows)
+
+    return total, iter_rows(), stats
+
+
 def select_download_rows(
     database: sqlite3.Connection,
     config: ProjectConfig,
@@ -228,12 +339,25 @@ def _download_capture(
     path: Path,
     config: ProjectConfig,
     client: HttpClient,
+    *,
+    verify_existing_hash: bool = True,
+    compute_hash: bool = True,
 ) -> dict:
     original = str(row["original_url"])
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_file():
-        size, digest = sha256_file(path)
-        preview = path.read_bytes()[:16384]
+        # Existing final paths have already crossed the atomic .part -> final
+        # boundary, so they are complete captures. Read only the small sniff
+        # prefix here instead of pulling the entire file into RAM merely to
+        # slice the first 16 KiB. The hash is still verified in the normal
+        # scan path when it is missing from the manifest.
+        size = path.stat().st_size
+        digest = str(row.get("content_hash") or "")
+        if not digest and verify_existing_hash:
+            _size, digest = sha256_file(path)
+            size = _size
+        with path.open("rb") as handle:
+            preview = handle.read(16384)
         return {
             "kind": "downloaded",
             "capture_id": int(row["id"]), "path": path, "bytes_saved": size,
@@ -247,9 +371,13 @@ def _download_capture(
     # retaining the configured budget for unknown-length responses.
     known_length = max(0, int(row.get("length") or 0))
     stream_limit = max(config.max_file_bytes, known_length + 1024 * 1024)
-    response = client.download_to_path(
-        replay_url(str(row["timestamp"]), original), temp, stream_limit
-    )
+    replay = replay_url(str(row["timestamp"]), original)
+    if compute_hash:
+        response = client.download_to_path(replay, temp, stream_limit)
+    else:
+        response = client.download_to_path(
+            replay, temp, stream_limit, compute_hash=False
+        )
     content_type = (
         response["headers"].get("content-type")
         or response["headers"].get("Content-Type")
@@ -288,7 +416,12 @@ def _scan_saved_capture(
     if not looks_textual_bytes(data[:16384], content_type):
         return {"kind": "non_text", "capture_id": int(row["id"]), "path": path}
     encoding = detect_encoding(data[:65536], content_type)
+    content_hash = str(row.get("content_hash") or "") or hashlib.sha256(data).hexdigest()
     raw = decode_bytes(data, content_type)
+    # The decoded source is the canonical scan input from this point onward.
+    # Releasing the byte buffer before DOM/normalization work avoids keeping
+    # both a potentially huge bytes object and several Unicode views alive.
+    del data
     replay_problem = classify_replay_content(raw, str(row.get("final_url") or replay_url(str(row["timestamp"]), str(row["original_url"]))))
     if replay_problem:
         raise RuntimeError(replay_problem)
@@ -311,7 +444,7 @@ def _scan_saved_capture(
     return {
         "kind": "scanned", "capture_id": int(row["id"]), "path": path,
         "title": title, "visible": visible, "links": links,
-        "analyses": analyses, "content_hash": str(row.get("content_hash") or sha256_file(path)[1]),
+        "analyses": analyses, "content_hash": content_hash,
         "normalized_hash": hash_text(prepared_normalized_fields["body"]),
         "bytes_saved": path.stat().st_size, "encoding": encoding,
     }
@@ -568,6 +701,7 @@ def download_archive(
                         completed_downloads += 1
                         downloaded_for_scan += 1
                     except RateLimitDeferred:
+                        flush_results(force=True)
                         with database:
                             database.execute("UPDATE captures SET state='pending',updated_at=? WHERE id=?", (utc_now(), capture_id))
                         raise
@@ -668,8 +802,8 @@ def download_archive_only(
 
     # Download-only is intentionally keyword-free. The operation orchestrator
     # forces all_text so this empty pattern set cannot become a URL keyword gate.
-    total, row_iter = prepare_download_rows(
-        database, config, [], states=states, capture_ids=capture_ids
+    total, row_iter, selection_stats = prepare_download_only_rows(
+        database, config, states=states, capture_ids=capture_ids
     )
 
     limiter = SharedFixedRateLimiter(config.download_delay)
@@ -701,6 +835,73 @@ def download_archive_only(
     submitted = downloaded = skipped = failures = 0
     started = time.monotonic()
     last_emit = 0.0
+    last_flush = started
+    flush_count = max(16, min(128, config.workers * 4))
+    success_buffer: list[tuple[str, str, int, str, int, int, int]] = []
+    skipped_buffer: list[int] = []
+    error_buffer: list[tuple[int, dict[str, object], BaseException]] = []
+
+    def flush_results(force: bool = False) -> None:
+        nonlocal last_flush
+        pending_count = len(success_buffer) + len(skipped_buffer) + len(error_buffer)
+        if not pending_count:
+            return
+        now_mono = time.monotonic()
+        if not force and pending_count < flush_count and now_mono - last_flush < 0.25:
+            return
+        now = utc_now()
+        with database:
+            if success_buffer:
+                database.executemany(
+                    """UPDATE captures SET state='downloaded_unscanned',local_path=?,
+                       content_hash=?,http_status=?,final_url=?,bytes_saved=?,
+                       skip_reason=NULL,classifier_revision=?,updated_at=? WHERE id=?""",
+                    (
+                        (path, content_hash, http_status, final_url, bytes_saved,
+                         classifier_revision, now, capture_id)
+                        for path, content_hash, http_status, final_url, bytes_saved,
+                            classifier_revision, capture_id in success_buffer
+                    ),
+                )
+                # Resolve earlier capture errors in one indexed UPDATE instead of
+                # one statement per successful replay. Buffers are intentionally
+                # small, so this remains below SQLite's variable limit.
+                success_ids = [row[-1] for row in success_buffer]
+                placeholders = ",".join("?" for _ in success_ids)
+                database.execute(
+                    "UPDATE errors SET resolved=1,last_seen=? WHERE resolved=0 "
+                    f"AND capture_id IN ({placeholders})",
+                    (now, *success_ids),
+                )
+            if skipped_buffer:
+                database.executemany(
+                    """UPDATE captures SET state='skipped',skip_reason='sniffed_non_text',
+                       classifier_revision=?,updated_at=? WHERE id=?""",
+                    ((CLASSIFIER_REVISION, now, capture_id) for capture_id in skipped_buffer),
+                )
+            for capture_id, item, exc in error_buffer:
+                category, status, retryable = classify_exception(exc)
+                database.execute(
+                    "UPDATE captures SET state='error',http_status=?,updated_at=? WHERE id=?",
+                    (status, now, capture_id),
+                )
+                record_error(
+                    database, "download", category, repr(exc), capture_id=capture_id,
+                    http_status=status, retryable=retryable,
+                )
+                if should_surface_site_issue(category):
+                    record_site_issue(
+                        database, host_from_url(str(item["original_url"])),
+                        "text_download", category,
+                        site_issue_message(
+                            category, str(item["original_url"]), "text download", status
+                        ),
+                        target=str(item["original_url"]), http_status=status,
+                    )
+        success_buffer.clear()
+        skipped_buffer.clear()
+        error_buffer.clear()
+        last_flush = now_mono
 
     def emit_progress(force: bool = False) -> None:
         nonlocal last_emit
@@ -711,11 +912,13 @@ def download_archive_only(
             return
         last_emit = now
         elapsed = max(0.001, now - started)
-        settled = downloaded + skipped + failures
+        metadata_skipped = int(selection_stats["metadata_skipped"])
+        settled = downloaded + skipped + failures + metadata_skipped
         callback(ProgressEvent(
             "download_only",
             f"Download-only: starts {submitted:,} ({submitted/elapsed:.1f}/s); "
-            f"saved {downloaded:,} ({downloaded/elapsed:.1f}/s); skipped {skipped:,}; "
+            f"saved {downloaded:,} ({downloaded/elapsed:.1f}/s); "
+            f"skipped {skipped + metadata_skipped:,}; "
             f"errors {failures:,}; {settled:,}/{total:,}",
             min(settled, total), total,
             {
@@ -723,8 +926,10 @@ def download_archive_only(
                 "replay_start_rate": submitted / elapsed,
                 "downloaded": downloaded,
                 "download_rate": downloaded / elapsed,
-                "skipped": skipped,
+                "skipped": skipped + metadata_skipped,
                 "failures": failures,
+                "pending": max(0, total - settled),
+                "downloaded_unscanned": downloaded,
                 "download_workers": config.workers,
                 "scan_workers": 0,
             },
@@ -766,12 +971,17 @@ def download_archive_only(
                                 ((str(path), now, int(item["id"])) for item, path in batch),
                             )
                         for item, path in batch:
-                            futures[pool.submit(_download_capture, item, path, config, client)] = item
+                            futures[pool.submit(
+                                _download_capture, item, path, config, client,
+                                verify_existing_hash=False, compute_hash=False,
+                            )] = item
                             submitted += 1
 
                 if not futures:
                     if rows_exhausted:
+                        flush_results(force=True)
                         break
+                    flush_results()
                     continue
 
                 done, _ = concurrent.futures.wait(
@@ -779,26 +989,24 @@ def download_archive_only(
                     return_when=concurrent.futures.FIRST_COMPLETED,
                 )
                 if not done:
+                    flush_results()
                     emit_progress()
                     continue
 
-                success_rows: list[tuple[str, str, int, str, int, int, str, int]] = []
-                skipped_ids: list[int] = []
-                errors: list[tuple[int, dict[str, object], BaseException]] = []
                 for future in done:
                     item = futures.pop(future)
                     capture_id = int(item["id"])
                     try:
                         result = future.result()
                         if result["kind"] == "non_text":
-                            skipped_ids.append(capture_id)
+                            skipped_buffer.append(capture_id)
                             skipped += 1
                             continue
                         path = Path(result["path"])
-                        success_rows.append((
+                        success_buffer.append((
                             str(path), str(result["content_hash"]), int(result["http_status"]),
                             str(result["final_url"]), int(result["bytes_saved"]),
-                            CLASSIFIER_REVISION, utc_now(), capture_id,
+                            CLASSIFIER_REVISION, capture_id,
                         ))
                         downloaded += 1
                     except RateLimitDeferred:
@@ -809,6 +1017,7 @@ def download_archive_only(
                             )
                         raise
                     except Stopped:
+                        flush_results(force=True)
                         with database:
                             database.execute(
                                 "UPDATE captures SET state='pending',updated_at=? WHERE id=?",
@@ -816,58 +1025,28 @@ def download_archive_only(
                             )
                         raise
                     except Exception as exc:
-                        errors.append((capture_id, item, exc))
+                        error_buffer.append((capture_id, item, exc))
                         failures += 1
 
-                # Persist a whole completion group in one transaction. This is the
-                # only normal SQLite write on the post-download hot path.
-                if success_rows or skipped_ids or errors:
-                    with database:
-                        if success_rows:
-                            database.executemany(
-                                """UPDATE captures SET state='downloaded_unscanned',local_path=?,
-                                   content_hash=?,http_status=?,final_url=?,bytes_saved=?,
-                                   skip_reason=NULL,classifier_revision=?,updated_at=? WHERE id=?""",
-                                success_rows,
-                            )
-                            for row in success_rows:
-                                resolve_errors(database, capture_id=int(row[-1]))
-                        for capture_id in skipped_ids:
-                            mark_capture_skipped(
-                                database, capture_id, "sniffed_non_text", CLASSIFIER_REVISION
-                            )
-                        for capture_id, item, exc in errors:
-                            category, status, retryable = classify_exception(exc)
-                            database.execute(
-                                "UPDATE captures SET state='error',http_status=?,updated_at=? WHERE id=?",
-                                (status, utc_now(), capture_id),
-                            )
-                            record_error(
-                                database, "download", category, repr(exc), capture_id=capture_id,
-                                http_status=status, retryable=retryable,
-                            )
-                            if should_surface_site_issue(category):
-                                record_site_issue(
-                                    database, host_from_url(str(item["original_url"])),
-                                    "text_download", category,
-                                    site_issue_message(
-                                        category, str(item["original_url"]), "text download", status
-                                    ),
-                                    target=str(item["original_url"]), http_status=status,
-                                )
+                # Coalesce completion records across executor wakeups. FIRST_COMPLETED
+                # often yields one future at a time; flushing by count/time avoids turning
+                # that into one SQLite commit per capture while preserving fast resume.
+                flush_results()
                 emit_progress()
 
+        flush_results(force=True)
         emit_progress(force=True)
         return {
             "queued": total,
             "downloaded": downloaded,
-            "skipped": skipped,
+            "skipped": skipped + int(selection_stats["metadata_skipped"]),
             "errors": failures,
             "elapsed": time.monotonic() - started,
         }
     except Stopped:
         for future in futures:
             future.cancel()
+        flush_results(force=True)
         with database:
             database.execute("UPDATE captures SET state='pending' WHERE state='downloading'")
         raise

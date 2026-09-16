@@ -28,7 +28,7 @@ class _ImmediateDownloadClient:
     def close(self):
         return None
 
-    def download_to_path(self, url, destination, max_bytes):
+    def download_to_path(self, url, destination, max_bytes, *, compute_hash=True):
         del max_bytes
         type(self).calls += 1
         payload = b"<html><body>download-only payload</body></html>"
@@ -39,7 +39,7 @@ class _ImmediateDownloadClient:
             "headers": {"content-type": "text/html; charset=utf-8"},
             "preview": payload,
             "bytes": len(payload),
-            "content_hash": hashlib.sha256(payload).hexdigest(),
+            "content_hash": hashlib.sha256(payload).hexdigest() if compute_hash else "",
             "status": 200,
             "final_url": url,
         }
@@ -47,7 +47,7 @@ class _ImmediateDownloadClient:
 
 class V1062DownloadOnlyTests(unittest.TestCase):
     def test_release_defaults_and_presets(self):
-        self.assertEqual(VERSION, "1.0.6.2")
+        self.assertEqual(VERSION, "1.0.6.3")
         config = ProjectConfig(output_dir=Path("."), targets=[], keywords=[]).normalized()
         self.assertEqual(config.workers, 10)
         self.assertEqual(config.scan_workers, 0)
@@ -199,7 +199,8 @@ class V1062DownloadOnlyTests(unittest.TestCase):
                 paths = run_project(config, "download_only", threading.Event(), None)
 
             self.assertEqual(_ImmediateDownloadClient.calls, 1)
-            self.assertEqual(paths, {"project": root / "project.json"})
+            self.assertEqual(set(paths), {"project"})
+            self.assertTrue(Path(paths["project"]).samefile(root / "project.json"))
             db = open_database(root)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM scan_runs").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 0)

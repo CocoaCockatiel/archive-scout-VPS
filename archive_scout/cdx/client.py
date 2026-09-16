@@ -324,6 +324,8 @@ class HttpClient:
         destination: Path,
         max_bytes: int,
         accept: str = "*/*",
+        *,
+        compute_hash: bool = True,
     ) -> dict:
         """Stream a response to disk while retaining the normal Wayback policy."""
         headers = {
@@ -353,9 +355,18 @@ class HttpClient:
                     if not self.host_gate.permit_is_current(permit):
                         self.host_gate.finish_request(permit, recovered=False)
                         continue
-                    response = self.transport.download(
-                        url, request_headers, destination, max_bytes, self.stop_event
-                    )
+                    if compute_hash:
+                        # Preserve the long-standing transport extension contract for
+                        # normal callers; the resource-lean acquisition path opts into
+                        # the new no-hash flag explicitly.
+                        response = self.transport.download(
+                            url, request_headers, destination, max_bytes, self.stop_event
+                        )
+                    else:
+                        response = self.transport.download(
+                            url, request_headers, destination, max_bytes, self.stop_event,
+                            compute_hash=False,
+                        )
                 status = int(response.status)
                 retry_after_header = response.headers.get("retry-after") or response.headers.get("Retry-After")
                 if status in {429, 503}:

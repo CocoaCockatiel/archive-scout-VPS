@@ -2,13 +2,13 @@
 
 Archive Scout is a cross-platform desktop research workspace for indexing, downloading, searching, reviewing, reconstructing, and analyzing public captures from the Internet Archive's Wayback Machine.
 
-Archive Scout 1.0.6.2 adds a dedicated high-throughput **Index and download only (no scanning)** operation. It keeps SQLite only as the durable capture manifest/resume queue while skipping scan runs, document extraction, matches, research indexing, media analysis, and scan reports so local CPU and disk activity stay focused on acquisition. Search with Hitlist can be run afterward against the indexed URLs and saved captures.
+Archive Scout 1.0.6.3 is the resource-efficiency release. It preserves the v1.0.6.2 acquisition-only workflow, v1.0.6.1 replay throughput, and v1.0.6 maximum-recall scanner while removing redundant disk reads, unnecessary hashing during download-only acquisition, project-sized temporary download queues, frequent completion commits, and live dashboard recounts during active work. Exact hashes deferred by download-only are backfilled by **Compact Project**, so storage deduplication remains available after acquisition.
 
 ## Downloads
 
-- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.2/ArchiveScout-Windows-x64.zip)
-- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.2/ArchiveScout-Linux-x64.zip)
-- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.2/ArchiveScout-macOS-Universal.zip)
+- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.3/ArchiveScout-Windows-x64.zip)
+- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.3/ArchiveScout-Linux-x64.zip)
+- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.3/ArchiveScout-macOS-Universal.zip)
 
 ## Core workflow
 

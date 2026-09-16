@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.6.3
+
+- Reduced resource use without reducing replay pacing or scan recall.
+- Download-only now avoids content hashing during acquisition and batches completion writes.
+- Download-only candidate selection streams directly from indexed capture rows instead of materializing a project-sized temporary queue.
+- Live dashboard COUNT queries are suspended while an operation is active; progress events provide live counters and exact totals refresh at operation boundaries.
+- Existing capture sniffing reads only the required prefix instead of the whole file, and scan/rescan hashing reuses bytes already in memory.
+- Fixed cross-platform temporary-path assertions in CI, including macOS `/private/var` versus `/var` aliases.
+
 ## 1.0.6.2
 
 - Added **Index and download only (no scanning)** to the Operations tab. It indexes the target and downloads textual captures without creating scanner workers, scan runs, documents, matches, research indexes, media jobs, or scan reports.

@@ -1,3 +1,30 @@
+# Archive Scout 1.0.6.3
+
+Archive Scout 1.0.6.3 reduces CPU, memory, and SQLite/filesystem pressure without lowering Wayback request pacing or search thoroughness. The v1.0.6.2 **Index and download only (no scanning)** operation remains the leanest acquisition path, while the normal download+scan and local rescan paths retain their existing recall semantics.
+
+## Resource-efficient acquisition
+
+- Download-only no longer computes SHA-256 while replay bytes are arriving. It streams to disk, retains only the small sniff prefix required for text/replay validation, and records the hash later only if a maintenance operation actually needs it.
+- Existing completed captures are sniffed with a small prefix read instead of reading the whole file merely to slice the first 16 KiB.
+- Download-only selection streams directly from indexed capture rows in bounded pages instead of inserting every candidate into a project-sized temporary SQLite queue. Known-size captures still receive small-first priority.
+- Completed downloads are coalesced across executor wakeups and written in count/time-bounded SQLite transactions; previously FIRST_COMPLETED could turn one finished request into one commit.
+- Successful capture-error resolution is performed in one indexed UPDATE per completion batch.
+- Compact Project now backfills deferred hashes for acquisition-only captures and includes raw capture files in exact-byte copy-on-write deduplication, preserving storage optimization without putting it in the replay hot path.
+
+## Lower memory and UI/database pressure
+
+- Scan and rescan hashing reuses bytes already loaded for decoding instead of reopening the same file for a second full disk pass. The raw byte buffer is released before DOM/normalization/scoring work begins.
+- Compact Project streams legacy document rows instead of fetching every large body row into memory at once.
+- While an operation is active, the Dashboard stops issuing repeated exact COUNT queries against large capture/document/match/error tables. Live progress comes from operation counters; exact totals refresh before/after operations and while idle.
+- Idle Dashboard recounts are less frequent, reducing page-cache churn on very large projects.
+
+## CI portability
+
+- The download-only path regression now compares resolved paths, fixing the macOS `/private/var/...` versus `/var/...` temporary-directory alias failure seen in the previous Tests workflow.
+- Package metadata and workflow checks target 1.0.6.3 across the supported Python/platform matrix.
+
+The established defaults remain unchanged: 10 download workers, 0.125-second replay spacing (up to eight starts/second), 0.75-second CDX spacing, 10 parallel CDX requests, automatic network backend/endpoint/index strategy, and coordinated 429/503 backoff.
+
 # Archive Scout 1.0.6.2
 
 Archive Scout 1.0.6.2 adds a dedicated acquisition-only workflow for very large Wayback projects. **Index and download only (no scanning)** indexes the target and downloads textual captures without creating scan jobs, documents, matches, research indexes, media jobs, or scan reports. SQLite remains only as the durable capture manifest, URL/timestamp mapping, retry state, and resume queue required by crash recovery and Search with Hitlist.

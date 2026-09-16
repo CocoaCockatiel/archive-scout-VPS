@@ -1,42 +1,37 @@
-Archive Scout 1.0.6.2 source validation
+Archive Scout 1.0.6.3 source validation
 Date: 2026-09-16
 
 Release scope
-- Adds the Operations-tab mode "Index and download only (no scanning)" for acquisition-first Wayback projects.
-- Download-only requires a target but no keyword set, indexes the target, downloads textual captures, and intentionally creates no scan jobs, documents, document matches, Research Intelligence index, media jobs, or scan reports.
-- SQLite remains schema version 8 and is retained only as the durable capture manifest/resume queue for exact original URL/timestamp mapping, local_path state, retries, errors, crash recovery, and later Search with Hitlist.
-- Downloaded files remain in downloaded_unscanned state so Hitlist can search them immediately and the normal local rescan path can process them later without another Wayback request.
-- The v1.0.6.1 normal download+scan pipeline and its independent scanner backlog remain available unchanged.
+- Preserves v1.0.6.2 Index and download only (no scanning), v1.0.6.1 acquisition-first replay pacing, and v1.0.6 maximum-recall scanning.
+- Reduces resource usage by removing redundant full-file reads, optional hot-path hashing, project-sized download-only queue materialization, per-completion SQLite commit pressure, and live dashboard recounts during active operations.
+- Database schema remains version 8. No destructive project migration is introduced.
 
-Acquisition-only performance details
-- No scanner executor is created by download_archive_only().
-- No keyword compiler/scoring path is required by the operation.
-- Replay workers stream directly to .part files and retain the existing one-pass response SHA-256 result.
-- Completed capture state is written in completion groups instead of creating per-file scan/document/match work.
-- Persisted operation-progress commits are relaxed to a 5-second interval during download-only acquisition while UI callbacks remain live.
-- Physical storage compaction remains outside the replay hot path and can be run later with Compact Project.
-- The configured shared Wayback request limiter, coordinated 429/503 host pause, retry policy, resumable partial files, and network backend fallback remain intact.
+Download-only resource behavior
+- Uses the existing capture manifest/resume database; no scanner pool, scan run, document, match, research index, media job, or scan report is created.
+- Candidate rows stream directly from indexed captures in bounded 2,000-row pages; no archive_scout_download_queue temp table is built for this operation.
+- Known-size captures retain small-first ordering through the existing composite capture index; unknown-size captures follow in ID order.
+- Replay bytes stream directly to .part files. SHA-256 is disabled only for download-only acquisition and content_hash remains empty until later scan/compaction work needs it.
+- Completion records are coalesced by count/time and persisted in bounded SQLite transactions; operation progress persistence remains relaxed for download-only runs.
+- Compact Project backfills missing acquisition-only capture hashes and includes raw captures in exact-byte copy-on-write deduplication.
 
-Requested defaults and presets
-- Download workers: 10.
-- Scanner workers: 0 (automatic; unused by download-only).
-- Maximum text-page size: 25 MB.
-- Minimum report score: 1.
-- CDX request spacing: 0.75 seconds.
-- Replay request spacing: 0.125 seconds (up to 8 starts/second).
-- Network backend / endpoint / index strategy: auto.
-- Parallel CDX requests: 10.
-- Settings page blocks: 0 (automatic); the high-throughput automatic Timemap profile still resolves to pageSize=9 internally.
-- Retry base / ceiling: 5 / 300 seconds; 429/503 shared pause: 30 / 300 seconds; graceful-pause failure threshold: 8.
-- System proxy/certificate environment and persistent recoverable-window retries remain enabled.
-- Automatic safety backups are disabled by default; retention remains 5 and the default budget remains 1024 MB if backups are enabled.
-- Removed the Ogrish-specific preset. General web archive research, Legacy forum research, Lost media discovery, and Blank project presets remain.
+Scanner / rescan memory and I/O
+- Existing final capture sniffing reads only the required prefix instead of read_bytes() on the entire file.
+- Normal scan and local rescan compute SHA-256 from bytes already loaded for decoding instead of performing a second full disk read.
+- The raw bytes buffer is released before DOM parsing, normalization, and scoring.
+- Compact Project iterates legacy body rows instead of fetchall() materialization.
+
+Dashboard behavior
+- Exact dashboard COUNT queries are suspended while an operation is active.
+- Live pending/backlog counters are updated from ProgressEvent detail.
+- Exact counts refresh at operation boundaries and every five seconds only while the Dashboard is idle/visible; other idle pages use a longer interval.
+
+CI portability fix
+- The previous macOS Tests workflow failed only because TemporaryDirectory resolved to /private/var/... while the expected Path retained the equivalent /var/... alias. The regression now compares resolved paths.
+- Version metadata checks target 1.0.6.3.
 
 Local automated validation
-- Full suite: 214 passed, 3 skipped, 9 subtests passed in this container.
-- Download-only regression coverage patches the scanner to raise if invoked and verifies every capture still downloads successfully.
-- Orchestrator regression coverage patches prepare_scan_jobs, Research Intelligence indexing, and media indexing to raise if invoked and verifies none are called.
-- A downloaded-only capture is verified searchable immediately through Search with Hitlist while the documents table remains empty.
-- Python compileall passed for archive_scout and tests.
-- git diff --check passed.
+- Full suite: 223 tests run, 220 passed, 3 skipped in this container.
+- v1.0.6.3 resource regression coverage verifies no-hash download-only transport, batched completion commits, queue-free download-only candidate streaming, deferred-hash compaction, no second scan hash read, and no active dashboard SQL recount.
+- Python compileall and git diff --check pass.
+- Offline 100,000-row benchmark smoke run completes with no live network access.
 - Native multi-platform GitHub Actions/build smoke tests must still run on the exact release commit before publishing platform binaries.
