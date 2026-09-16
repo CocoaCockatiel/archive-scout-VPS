@@ -157,12 +157,12 @@ def build_num_pages_params(
     params = [(key, value) for key, value in params if key not in {"limit", "showResumeKey", "resumeKey"}]
     params.append(("showNumPages", "true"))
     blocks = config.network.normalized().page_blocks if page_blocks is None else int(page_blocks)
-    # 0 deliberately means "use Internet Archive's server-selected page size".
-    # The server default groups substantially more ZipNum blocks than the old
-    # hard-coded pageSize=9, which avoids turning broad sites into thousands of
-    # tiny page requests while keeping the official pagination mechanism.
-    if blocks > 0:
-        params.append(("pageSize", str(blocks)))
+    # The Settings-tab default is 0, meaning "automatic".  Archive Scout's
+    # high-throughput automatic profile uses the proven pageSize=9 grouping
+    # with ten parallel Timemap workers; explicit positive values remain custom.
+    if blocks <= 0:
+        blocks = 9
+    params.append(("pageSize", str(blocks)))
     return params
 
 
@@ -178,8 +178,9 @@ def build_paged_cdx_params(
     params = [(key, value) for key, value in params if key not in {"limit", "showResumeKey", "resumeKey"}]
     params.append(("page", str(max(0, int(page)))))
     blocks = config.network.normalized().page_blocks if page_blocks is None else int(page_blocks)
-    if blocks > 0:
-        params.append(("pageSize", str(blocks)))
+    if blocks <= 0:
+        blocks = 9
+    params.append(("pageSize", str(blocks)))
     return params
 
 

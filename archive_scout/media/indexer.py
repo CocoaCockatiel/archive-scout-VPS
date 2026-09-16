@@ -165,8 +165,10 @@ def build_media_num_pages_params(
     params = build_media_params(config, pattern, start, end, extensions=extensions)
     params = [(key, value) for key, value in params if key not in {"limit", "showResumeKey", "resumeKey"}]
     params.append(("showNumPages", "true"))
-    if int(page_blocks) > 0:
-        params.append(("pageSize", str(int(page_blocks))))
+    blocks = int(page_blocks)
+    if blocks <= 0:
+        blocks = 9
+    params.append(("pageSize", str(blocks)))
     return params
 
 
@@ -182,8 +184,10 @@ def build_media_paged_params(
     params = build_media_params(config, pattern, start, end, extensions=extensions)
     params = [(key, value) for key, value in params if key not in {"limit", "showResumeKey", "resumeKey"}]
     params.append(("page", str(max(0, page))))
-    if int(page_blocks) > 0:
-        params.append(("pageSize", str(int(page_blocks))))
+    blocks = int(page_blocks)
+    if blocks <= 0:
+        blocks = 9
+    params.append(("pageSize", str(blocks)))
     return params
 
 

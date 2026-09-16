@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.6.2
+
+- Added **Index and download only (no scanning)** to the Operations tab. It indexes the target and downloads textual captures without creating scanner workers, scan runs, documents, matches, research indexes, media jobs, or scan reports.
+- Kept SQLite as a lightweight durable manifest/resume queue instead of replacing it with filename-only state, preserving exact URL/timestamp mapping, retries, crash recovery, and Search with Hitlist coverage.
+- Added a dedicated acquisition-only replay loop with batched completion writes and reduced operation-progress commits; saved files remain `downloaded_unscanned` for later Hitlist search or local rescan.
+- Made the requested fast Settings-tab profile the defaults: 10 download workers, automatic scanner workers, 25 MB text pages, 0.75 s CDX spacing, 0.125 s replay spacing, automatic network choices, 10 parallel CDX requests, automatic page blocks, 30/300 s shared rate-limit pauses, 5/300 s retry backoff, and automatic backups disabled.
+- Removed the Ogrish-specific preset and replaced it with general-purpose web archive, legacy forum, lost-media, and blank-project presets.
+
 ## 1.0.6.1
 
 - Restored the v1.0.5 high-throughput replay philosophy: ten download workers at the configured 0.125-second shared start spacing are no longer throttled by local scanner backlog.

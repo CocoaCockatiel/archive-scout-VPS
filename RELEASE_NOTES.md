@@ -1,3 +1,11 @@
+# Archive Scout 1.0.6.2
+
+Archive Scout 1.0.6.2 adds a dedicated acquisition-only workflow for very large Wayback projects. **Index and download only (no scanning)** indexes the target and downloads textual captures without creating scan jobs, documents, matches, research indexes, media jobs, or scan reports. SQLite remains only as the durable capture manifest, URL/timestamp mapping, retry state, and resume queue required by crash recovery and Search with Hitlist.
+
+The download-only path has no scanner pool or keyword requirement. Replay files stream directly to disk, SHA-256 is retained from the streaming download path, completion state is written in groups, operation-progress persistence is relaxed to reduce SQLite churn, and saved captures remain `downloaded_unscanned` for later Hitlist search or local rescanning. The normal v1.0.6.1 download+scan pipeline remains available unchanged.
+
+Settings now default to the established fast profile shown in the UI: 10 download workers, automatic scanner workers, 25 MB text-page limit, 0.75-second CDX spacing, 0.125-second replay spacing (up to eight starts/second), automatic network backend/endpoint/index strategy, 10 parallel CDX requests, automatic page-block selection, 30/300-second shared 429/503 pauses, 5/300-second retry backoff, and automatic safety backups disabled by default. The old Ogrish-specific preset has been removed and replaced by general web archive, legacy forum, lost-media, and blank-project presets.
+
 # Archive Scout 1.0.6.1
 
 Archive Scout 1.0.6.1 is a focused throughput hotfix for 1.0.6. It preserves the maximum-recall scanner, durable stage-based resume, Search with Hitlist, URL-derived filenames, storage compaction, auditable skip/error state, and per-page indexing checkpoints while restoring v1.0.5-style replay acquisition speed.

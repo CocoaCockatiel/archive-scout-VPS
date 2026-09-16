@@ -197,7 +197,7 @@ class NetworkConfig:
     trust_environment: bool = True
     endpoint_mode: str = "auto"
     index_strategy: str = "auto"
-    page_blocks: int = 9
+    page_blocks: int = 0
     cdx_workers: int = 10
     persistent_retries: bool = True
     retry_base_seconds: float = 5.0
@@ -278,7 +278,7 @@ class ProjectConfig:
     research: ResearchConfig | dict = field(default_factory=ResearchConfig)
     network: NetworkConfig | dict = field(default_factory=NetworkConfig)
     target_settings: dict[str, dict] = field(default_factory=dict)
-    auto_backup: bool = True
+    auto_backup: bool = False
     backup_keep: int = 5
     backup_max_mb: float = 1024.0
     compact_storage: bool = True
@@ -446,6 +446,7 @@ def load_project_config(path: Path) -> ProjectConfig:
     ai_payload = payload.get("ai") or {}
     research_payload = payload.get("research") or {}
     network_payload = payload.get("network") or {}
+    saved_version = str(payload.get("version") or "")
     loaded_page_size = int(payload.get("page_size", 100000))
     loaded_cdx_delay = float(payload.get("cdx_delay", 0.75))
     loaded_page_blocks = int(network_payload.get("page_blocks", 0))
@@ -497,7 +498,8 @@ def load_project_config(path: Path) -> ProjectConfig:
     # in flight using the historical pageSize=9 grouping. Upgrade only the
     # untouched v1.0.4 automatic indexing profile.
     if (
-        loaded_page_size == 100000
+        saved_version != "1.0.6.2"
+        and loaded_page_size == 100000
         and loaded_cdx_delay == 0.75
         and loaded_page_blocks == 0
         and loaded_cdx_workers == 10
@@ -609,7 +611,7 @@ def load_project_config(path: Path) -> ProjectConfig:
             diagnostics=bool(network_payload.get("diagnostics", True)),
         ),
         target_settings=dict(payload.get("target_settings") or {}),
-        auto_backup=bool(payload.get("auto_backup", True)),
+        auto_backup=bool(payload.get("auto_backup", False)),
         backup_keep=int(payload.get("backup_keep", 5)),
         backup_max_mb=float(payload.get("backup_max_mb", 1024.0)),
         compact_storage=bool(payload.get("compact_storage", True)),

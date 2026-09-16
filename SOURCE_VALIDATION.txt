@@ -1,42 +1,42 @@
-Archive Scout 1.0.6.1 source validation
+Archive Scout 1.0.6.2 source validation
 Date: 2026-09-16
 
 Release scope
-- Focused performance hotfix on top of v1.0.6; schema remains version 8.
-- Restores the v1.0.5 acquisition-first replay philosophy: 10 download workers and the configured 0.125-second shared replay start spacing are no longer gated by scanner backlog.
-- Keeps every v1.0.6 recall, durable-resume, Search with Hitlist, URL-derived filename, skip/error audit, storage-compaction, macOS process-name, and per-page index checkpoint feature.
-- Automatic indexing remains the v1.0.5/v1.0.6 Timemap profile: pageSize=9, 10 bounded workers, 0.75-second CDX request spacing, rolling queues up to 1,000 pages, and resume-key/date-window recovery fallbacks.
+- Adds the Operations-tab mode "Index and download only (no scanning)" for acquisition-first Wayback projects.
+- Download-only requires a target but no keyword set, indexes the target, downloads textual captures, and intentionally creates no scan jobs, documents, document matches, Research Intelligence index, media jobs, or scan reports.
+- SQLite remains schema version 8 and is retained only as the durable capture manifest/resume queue for exact original URL/timestamp mapping, local_path state, retries, errors, crash recovery, and later Search with Hitlist.
+- Downloaded files remain in downloaded_unscanned state so Hitlist can search them immediately and the normal local rescan path can process them later without another Wayback request.
+- The v1.0.6.1 normal download+scan pipeline and its independent scanner backlog remain available unchanged.
 
-Performance hotfix details
-- SQLite WAL synchronous mode restored from FULL to NORMAL.
-- WAL auto-checkpoint restored from 4,000 to 10,000 pages.
-- captures.local_path now has an index so URL-derived path collision checks do not scan giant capture tables.
-- Pre-download state transitions are batched before worker submission.
-- Scanner backlog is durable in SQLite and may grow independently while replay acquisition continues; only a bounded local scan window is kept in memory.
-- Scanner polling is non-blocking while acquisition still has work.
-- Exact-byte CoW deduplication remains available through Compact Project but is removed from the text/media replay hot path.
-- Network response hashing remains one-pass while response bytes are streamed to disk.
-- Progress reports replay-start, completed-download, scan, and scan-backlog rates separately.
+Acquisition-only performance details
+- No scanner executor is created by download_archive_only().
+- No keyword compiler/scoring path is required by the operation.
+- Replay workers stream directly to .part files and retain the existing one-pass response SHA-256 result.
+- Completed capture state is written in completion groups instead of creating per-file scan/document/match work.
+- Persisted operation-progress commits are relaxed to a 5-second interval during download-only acquisition while UI callbacks remain live.
+- Physical storage compaction remains outside the replay hot path and can be run later with Compact Project.
+- The configured shared Wayback request limiter, coordinated 429/503 host pause, retry policy, resumable partial files, and network backend fallback remain intact.
+
+Requested defaults and presets
+- Download workers: 10.
+- Scanner workers: 0 (automatic; unused by download-only).
+- Maximum text-page size: 25 MB.
+- Minimum report score: 1.
+- CDX request spacing: 0.75 seconds.
+- Replay request spacing: 0.125 seconds (up to 8 starts/second).
+- Network backend / endpoint / index strategy: auto.
+- Parallel CDX requests: 10.
+- Settings page blocks: 0 (automatic); the high-throughput automatic Timemap profile still resolves to pageSize=9 internally.
+- Retry base / ceiling: 5 / 300 seconds; 429/503 shared pause: 30 / 300 seconds; graceful-pause failure threshold: 8.
+- System proxy/certificate environment and persistent recoverable-window retries remain enabled.
+- Automatic safety backups are disabled by default; retention remains 5 and the default budget remains 1024 MB if backups are enabled.
+- Removed the Ogrish-specific preset. General web archive research, Legacy forum research, Lost media discovery, and Blank project presets remain.
 
 Local automated validation
-- 213 automated tests passed; 3 skipped in this container (optional native ahocorasick-rs/selectolax execution tests and one display-dependent Tk theme test).
-- Added a regression test that blocks a one-worker scanner while replay acquisition continues; at least 30 of 40 replay requests must start before scanner release, proving scanner backlog cannot throttle the network feeder.
-- Added checks for WAL synchronous=NORMAL, wal_autocheckpoint=10000, and captures_local_path_idx.
-- Python compileall passed for archive_scout, tests, scripts, run_app.py, and run_cli.py.
-- scripts/build_linux.sh and scripts/build_macos.sh passed bash syntax validation.
+- Full suite: 214 passed, 3 skipped, 9 subtests passed in this container.
+- Download-only regression coverage patches the scanner to raise if invoked and verifies every capture still downloads successfully.
+- Orchestrator regression coverage patches prepare_scan_jobs, Research Intelligence indexing, and media indexing to raise if invoked and verifies none are called.
+- A downloaded-only capture is verified searchable immediately through Search with Hitlist while the documents table remains empty.
+- Python compileall passed for archive_scout and tests.
 - git diff --check passed.
-- Offline 100k benchmark completed with zero HTTP attempts.
 - Native multi-platform GitHub Actions/build smoke tests must still run on the exact release commit before publishing platform binaries.
-
-Offline 100k benchmark on this container
-- parse_cdx_chunks: 2.433378 s
-- literal_prefilter: 0.609290 s
-- literal_scoring: 0.630386 s
-- parse_and_upsert_cdx_chunks: 4.184278 s
-- repeat_parse_and_noop_upsert: 3.292400 s (0 unchanged writes)
-- browse_500: 0.008509 s
-- export_json: 0.035478 s
-- HTTP attempts: 0
-
-Build note
-- Wheel build could not be repeated in this isolated container because the Python build frontend is not installed and the environment has no Internet access to fetch setuptools/build dependencies. Source compilation and the complete local test suite passed.

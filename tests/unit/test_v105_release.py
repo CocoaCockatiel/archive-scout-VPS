@@ -23,7 +23,7 @@ class V105ReleaseTests(unittest.TestCase):
             network=NetworkConfig(index_strategy='auto'),
         ).normalized()
         self.assertEqual(preferred_index_strategy(config, 'example.com/*'), 'paged')
-        self.assertEqual(config.network.page_blocks, 9)
+        self.assertEqual(config.network.page_blocks, 0)
         self.assertEqual(config.network.cdx_workers, 10)
         self.assertEqual(config.cdx_delay, 0.75)
         self.assertIn('/web/timemap/json', cdx_paged_endpoints(config)[0])

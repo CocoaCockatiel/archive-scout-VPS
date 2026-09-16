@@ -2,17 +2,19 @@
 
 Archive Scout is a cross-platform desktop research workspace for indexing, downloading, searching, reviewing, reconstructing, and analyzing public captures from the Internet Archive's Wayback Machine.
 
-Archive Scout 1.0.6.1 is the high-throughput hotfix for the maximum-recall, durable-resume, and storage-efficiency 1.0.6 release. It keeps the v1.0.5 Timemap-first indexing envelope while separating replay downloading from local scanning, preserving canonical replay payloads for future rescans, adding resumable Search with Hitlist, making skip/error state auditable, and reducing redundant on-disk/database storage.
+Archive Scout 1.0.6.2 adds a dedicated high-throughput **Index and download only (no scanning)** operation. It keeps SQLite only as the durable capture manifest/resume queue while skipping scan runs, document extraction, matches, research indexing, media analysis, and scan reports so local CPU and disk activity stay focused on acquisition. Search with Hitlist can be run afterward against the indexed URLs and saved captures.
 
 ## Downloads
 
-- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.1/ArchiveScout-Windows-x64.zip)
-- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.1/ArchiveScout-Linux-x64.zip)
-- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.1/ArchiveScout-macOS-Universal.zip)
+- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.2/ArchiveScout-Windows-x64.zip)
+- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.2/ArchiveScout-Linux-x64.zip)
+- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.2/ArchiveScout-macOS-Universal.zip)
 
 ## Core workflow
 
 A typical research project follows this sequence:
+
+For bulk acquisition where scanning can wait, choose **Index and download only (no scanning)**. That mode requires no keyword set, writes only capture/resume state to SQLite, leaves saved captures as `downloaded_unscanned`, and is designed to be followed by **Search with Hitlist** or a later local rescan.
 
 1. Add one or more sites, URL prefixes, or exact URLs.
 2. Set the archive date range and optional CDX parameters.

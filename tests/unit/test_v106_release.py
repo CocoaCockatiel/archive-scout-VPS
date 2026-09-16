@@ -23,7 +23,7 @@ from archive_scout.utils import normalize_search
 
 class V106ReleaseTests(unittest.TestCase):
     def test_release_identity(self):
-        self.assertEqual(VERSION, '1.0.6.1')
+        self.assertEqual(VERSION, '1.0.6.2')
         self.assertEqual(SCHEMA_VERSION, 8)
 
     def test_url_filename_preserves_query_and_is_portable(self):

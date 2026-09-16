@@ -13,7 +13,7 @@ from .analysis.workflow import run_analysis
 from .config import KeywordSetConfig, ProjectConfig, save_project_config
 from .database.connection import open_database
 from .database.repositories import (finish_scan_run, get_or_create_keyword_set, latest_scan_run, start_scan_run, start_operation_run, finish_operation_run, update_operation_run)
-from .downloads.downloader import download_archive
+from .downloads.downloader import download_archive, download_archive_only
 from .downloads.retry import retry_error_urls
 from .events import ConnectivityPaused, ProgressEvent, Stopped
 from .media.downloader import download_media, retry_media_errors
@@ -34,7 +34,7 @@ from .scanning.rescanner import rescan_keyword_sets
 from .scanning.hitlist import load_hitlist, search_with_hitlist
 
 SUPPORTED_MODES = {
-    "all", "external_media_after_scan", "index", "download", "resume", "rescan", "retry_errors", "report", "integrity",
+    "all", "external_media_after_scan", "index", "download_only", "download", "resume", "rescan", "retry_errors", "report", "integrity",
     "repair", "backup", "diagnostics", "import_folder",
     "media_all", "media_index", "media_download", "media_retry",
     "analysis", "research_index", "forum_rebuild", "merge_project", "hitlist", "compact",
@@ -123,7 +123,7 @@ def run_project(
         raise ValueError(f"unsupported mode: {mode}")
     if config.from_date > config.to_date:
         raise ValueError("start date must not be later than end date")
-    if mode in {"all", "external_media_after_scan", "index"} and not config.targets:
+    if mode in {"all", "external_media_after_scan", "index", "download_only"} and not config.targets:
         raise ValueError("at least one target is required")
     if mode.startswith("media_") and not (config.media.targets or config.targets):
         raise ValueError("at least one media target or site target is required")
@@ -143,6 +143,7 @@ def run_project(
     owner_thread_id = threading.get_ident()
     last_progress_write = 0.0
     last_progress_stage = ""
+    progress_persist_interval = 5.0 if mode == "download_only" else 0.75
 
     def operation_callback(event: ProgressEvent) -> None:
         nonlocal last_progress_write, last_progress_stage
@@ -158,7 +159,7 @@ def run_project(
             # UI/bot callbacks still receive every event immediately. Persisted
             # operation progress is rate-limited so a fast download/scan no longer
             # forces a full SQLite commit for every single completed item.
-            should_write = stage_changed or completed_boundary or now - last_progress_write >= 0.75
+            should_write = stage_changed or completed_boundary or now - last_progress_write >= progress_persist_interval
             if should_write:
                 update_operation_run(
                     database,
@@ -273,6 +274,31 @@ def run_project(
             finish_operation_run(database, operation_run_id, "complete", str(merge_report))
             database.commit()
             return {"merge_summary": merge_report}
+        if mode == "download_only":
+            # Keep SQLite as a lightweight durable manifest/resume queue. Removing
+            # it would force Hitlist and crash recovery to rediscover URL/timestamp
+            # metadata from filenames and would cost more than the tiny batched
+            # capture-state writes saved here. No scan/document/match/research/media
+            # work is created in this mode.
+            acquisition_config = replace(config, download_scope="all_text")
+            index_archive(acquisition_config, database, stop_event, callback)
+            stats = download_archive_only(
+                acquisition_config, database, stop_event, callback, states=("pending",)
+            )
+            emit(
+                callback,
+                ProgressEvent(
+                    "download_only",
+                    f"Download-only acquisition complete: {int(stats['downloaded']):,} saved; "
+                    f"{int(stats['skipped']):,} non-text skipped; {int(stats['errors']):,} errors. "
+                    "Run Search with Hitlist when ready.",
+                    int(stats["queued"]), int(stats["queued"]),
+                    {"downloaded": int(stats["downloaded"]), "scan_workers": 0},
+                ),
+            )
+            finish_operation_run(database, operation_run_id, "complete", "Download-only acquisition complete")
+            database.commit()
+            return {"project": config.output_dir / "project.json"}
         if mode == "index":
             index_archive(config, database, stop_event, callback)
             paths = generate_index_reports(config, database)

@@ -60,6 +60,7 @@ from .widgets import ToolTip
 MODE_LABELS = OPERATION_MODES
 MODE_HELP = {
     "all": "Queries CDX, downloads pending text captures, scans every selected keyword set, and writes reports.",
+    "download_only": "Indexes the target and downloads every text capture without creating scan jobs, documents, matches, research indexes, media jobs, or scan reports. Run Search with Hitlist afterward.",
     "external_media_after_scan": "Indexes the site, downloads and scans all selected text pages, then indexes only external media URLs found in those saved pages and downloads them after discovery finishes.",
     "index": "Queries CDX and stores capture metadata without downloading pages.",
     "download": "Downloads pending text captures and scans them with every selected keyword set.",
@@ -177,7 +178,7 @@ class ArchiveScoutApp(tk.Tk):
     def create_variables(self) -> None:
         default_output = Path.home() / "Downloads" / "ArchiveScout"
         self.output_var = tk.StringVar(value=str(default_output))
-        self.preset_var = tk.StringVar(value="Ogrish 9/11 research")
+        self.preset_var = tk.StringVar(value="General web archive research")
         self.mode_var = tk.StringVar(value="Index, download, scan, and report")
         self.operation_help_var = tk.StringVar(value=MODE_HELP["all"])
         self.scope_var = tk.StringVar(value="All archived text pages (thorough)")
@@ -209,9 +210,9 @@ class ArchiveScoutApp(tk.Tk):
         self.network_trust_env_var = tk.BooleanVar(value=True)
         self.network_persistent_var = tk.BooleanVar(value=True)
         self.network_retry_base_var = tk.StringVar(value="5")
-        self.network_retry_max_var = tk.StringVar(value="120")
+        self.network_retry_max_var = tk.StringVar(value="300")
         self.network_failure_limit_var = tk.StringVar(value="8")
-        self.auto_backup_var = tk.BooleanVar(value=True)
+        self.auto_backup_var = tk.BooleanVar(value=False)
         self.backup_keep_var = tk.StringVar(value="5")
         self.backup_max_var = tk.StringVar(value="1024")
         self.hitlist_file_var = tk.StringVar()
@@ -374,7 +375,7 @@ class ArchiveScoutApp(tk.Tk):
         status.grid(row=3, column=0, columnspan=4, sticky="ew")
         ttk.Label(status, text="Pending text:").pack(side="left")
         ttk.Label(status, textvariable=self.dashboard_pending_var).pack(side="left", padx=(4, 16))
-        ttk.Label(status, text="Waiting scan:").pack(side="left")
+        ttk.Label(status, text="Saved unscanned:").pack(side="left")
         ttk.Label(status, textvariable=self.dashboard_waiting_scan_var).pack(side="left", padx=(4, 16))
         ttk.Label(status, text="Skipped non-text:").pack(side="left")
         ttk.Label(status, textvariable=self.dashboard_skipped_non_text_var).pack(side="left", padx=(4, 16))
@@ -1364,7 +1365,7 @@ class ArchiveScoutApp(tk.Tk):
         except (ValueError, KeyError) as exc:
             raise ValueError(f"Check the numeric settings, keyword rules, and target lines: {exc}") from exc
         mode = selected_mode
-        if mode in {"all", "external_media_after_scan", "index"} and not config.targets:
+        if mode in {"all", "external_media_after_scan", "index", "download_only"} and not config.targets:
             raise ValueError("Add at least one site or path.")
         if require_keywords and mode in {"all", "external_media_after_scan", "download", "resume", "rescan", "retry_errors"} and not config.selected_keyword_sets():
             raise ValueError("Select at least one non-empty keyword set.")

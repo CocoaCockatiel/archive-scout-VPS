@@ -641,3 +641,235 @@ def download_archive(
         raise
     finally:
         client.close()
+
+def download_archive_only(
+    config: ProjectConfig,
+    database: sqlite3.Connection,
+    stop_event: threading.Event,
+    callback: Callable[[ProgressEvent], None] | None,
+    states: tuple[str, ...] = ("pending",),
+    capture_ids: list[int] | None = None,
+) -> dict[str, int | float]:
+    """Acquire indexed text captures without creating any scan work.
+
+    This is the deliberately lean acquisition path used by the download-only
+    operation. SQLite remains the durable capture manifest/resume queue because
+    Hitlist, exact resume, retry state, and URL-to-file mapping all depend on it,
+    but no documents, scan runs, matches, research indexes, media jobs, or scan
+    reports are created here.
+    """
+    if config.download_scope == "index_only":
+        if callback:
+            callback(ProgressEvent("download_only", "Index-only scope selected; downloads skipped."))
+        return {"queued": 0, "downloaded": 0, "skipped": 0, "errors": 0, "elapsed": 0.0}
+
+    with database:
+        database.execute("UPDATE captures SET state='pending' WHERE state='downloading'")
+
+    # Download-only is intentionally keyword-free. The operation orchestrator
+    # forces all_text so this empty pattern set cannot become a URL keyword gate.
+    total, row_iter = prepare_download_rows(
+        database, config, [], states=states, capture_ids=capture_ids
+    )
+
+    limiter = SharedFixedRateLimiter(config.download_delay)
+    host_gate = shared_host_gate(config.rate_limit_base_pause, config.rate_limit_max_pause)
+
+    def on_retry(attempt: int, total_attempts: int, reason: str, wait_seconds: float) -> None:
+        if callback:
+            stage = "rate_limit" if "all Wayback requests paused" in reason else "download_retry"
+            callback(ProgressEvent(stage, f"{reason}. Retry {attempt}/{total_attempts} in {wait_seconds:.1f}s…"))
+
+    client = HttpClient(
+        limiter, config.retries, max(config.connect_timeout, config.read_timeout),
+        config.user_agent, stop_event, retry_callback=on_retry,
+        connect_timeout=config.connect_timeout, read_timeout=config.read_timeout,
+        pool_size=config.workers, host_gate=host_gate,
+        rate_limit_attempts=config.rate_limit_attempts,
+        rate_limit_max_wait=config.rate_limit_max_wait,
+        network_backend=config.network.normalized().backend,
+        trust_environment=config.network.normalized().trust_environment,
+        network_callback=(lambda message: callback(ProgressEvent("network", message)) if callback else None),
+    )
+
+    # Keep a deeper producer window than the normal scan pipeline because no
+    # local CPU stage exists to consume executor time or memory. The fixed rate
+    # limiter still controls Wayback request starts.
+    inflight_limit = max(config.workers, config.workers * 3)
+    futures: dict[concurrent.futures.Future, dict[str, object]] = {}
+    rows_exhausted = False
+    submitted = downloaded = skipped = failures = 0
+    started = time.monotonic()
+    last_emit = 0.0
+
+    def emit_progress(force: bool = False) -> None:
+        nonlocal last_emit
+        if not callback:
+            return
+        now = time.monotonic()
+        if not force and now - last_emit < 0.5:
+            return
+        last_emit = now
+        elapsed = max(0.001, now - started)
+        settled = downloaded + skipped + failures
+        callback(ProgressEvent(
+            "download_only",
+            f"Download-only: starts {submitted:,} ({submitted/elapsed:.1f}/s); "
+            f"saved {downloaded:,} ({downloaded/elapsed:.1f}/s); skipped {skipped:,}; "
+            f"errors {failures:,}; {settled:,}/{total:,}",
+            min(settled, total), total,
+            {
+                "replay_started": submitted,
+                "replay_start_rate": submitted / elapsed,
+                "downloaded": downloaded,
+                "download_rate": downloaded / elapsed,
+                "skipped": skipped,
+                "failures": failures,
+                "download_workers": config.workers,
+                "scan_workers": 0,
+            },
+        ))
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=config.workers, thread_name_prefix="archive-download-only"
+        ) as pool:
+            while True:
+                if stop_event.is_set():
+                    raise Stopped
+
+                slots = inflight_limit - len(futures)
+                if not rows_exhausted and slots > 0:
+                    batch: list[tuple[dict[str, object], Path]] = []
+                    reserved_paths: set[str] = set()
+                    while len(batch) < slots:
+                        try:
+                            row = next(row_iter)
+                        except StopIteration:
+                            rows_exhausted = True
+                            break
+                        item = dict(row)
+                        path = _allocate_capture_path(database, config.output_dir, row)
+                        if str(path) in reserved_paths:
+                            path = url_capture_path(
+                                config.output_dir, str(row["timestamp"]), str(row["original_url"]),
+                                disambiguate=True,
+                            )
+                        reserved_paths.add(str(path))
+                        batch.append((item, path))
+                    if batch:
+                        now = utc_now()
+                        with database:
+                            database.executemany(
+                                """UPDATE captures SET state='downloading',local_path=?,
+                                   download_attempts=download_attempts+1,updated_at=? WHERE id=?""",
+                                ((str(path), now, int(item["id"])) for item, path in batch),
+                            )
+                        for item, path in batch:
+                            futures[pool.submit(_download_capture, item, path, config, client)] = item
+                            submitted += 1
+
+                if not futures:
+                    if rows_exhausted:
+                        break
+                    continue
+
+                done, _ = concurrent.futures.wait(
+                    tuple(futures), timeout=0.05,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                if not done:
+                    emit_progress()
+                    continue
+
+                success_rows: list[tuple[str, str, int, str, int, int, str, int]] = []
+                skipped_ids: list[int] = []
+                errors: list[tuple[int, dict[str, object], BaseException]] = []
+                for future in done:
+                    item = futures.pop(future)
+                    capture_id = int(item["id"])
+                    try:
+                        result = future.result()
+                        if result["kind"] == "non_text":
+                            skipped_ids.append(capture_id)
+                            skipped += 1
+                            continue
+                        path = Path(result["path"])
+                        success_rows.append((
+                            str(path), str(result["content_hash"]), int(result["http_status"]),
+                            str(result["final_url"]), int(result["bytes_saved"]),
+                            CLASSIFIER_REVISION, utc_now(), capture_id,
+                        ))
+                        downloaded += 1
+                    except RateLimitDeferred:
+                        with database:
+                            database.execute(
+                                "UPDATE captures SET state='pending',updated_at=? WHERE id=?",
+                                (utc_now(), capture_id),
+                            )
+                        raise
+                    except Stopped:
+                        with database:
+                            database.execute(
+                                "UPDATE captures SET state='pending',updated_at=? WHERE id=?",
+                                (utc_now(), capture_id),
+                            )
+                        raise
+                    except Exception as exc:
+                        errors.append((capture_id, item, exc))
+                        failures += 1
+
+                # Persist a whole completion group in one transaction. This is the
+                # only normal SQLite write on the post-download hot path.
+                if success_rows or skipped_ids or errors:
+                    with database:
+                        if success_rows:
+                            database.executemany(
+                                """UPDATE captures SET state='downloaded_unscanned',local_path=?,
+                                   content_hash=?,http_status=?,final_url=?,bytes_saved=?,
+                                   skip_reason=NULL,classifier_revision=?,updated_at=? WHERE id=?""",
+                                success_rows,
+                            )
+                            for row in success_rows:
+                                resolve_errors(database, capture_id=int(row[-1]))
+                        for capture_id in skipped_ids:
+                            mark_capture_skipped(
+                                database, capture_id, "sniffed_non_text", CLASSIFIER_REVISION
+                            )
+                        for capture_id, item, exc in errors:
+                            category, status, retryable = classify_exception(exc)
+                            database.execute(
+                                "UPDATE captures SET state='error',http_status=?,updated_at=? WHERE id=?",
+                                (status, utc_now(), capture_id),
+                            )
+                            record_error(
+                                database, "download", category, repr(exc), capture_id=capture_id,
+                                http_status=status, retryable=retryable,
+                            )
+                            if should_surface_site_issue(category):
+                                record_site_issue(
+                                    database, host_from_url(str(item["original_url"])),
+                                    "text_download", category,
+                                    site_issue_message(
+                                        category, str(item["original_url"]), "text download", status
+                                    ),
+                                    target=str(item["original_url"]), http_status=status,
+                                )
+                emit_progress()
+
+        emit_progress(force=True)
+        return {
+            "queued": total,
+            "downloaded": downloaded,
+            "skipped": skipped,
+            "errors": failures,
+            "elapsed": time.monotonic() - started,
+        }
+    except Stopped:
+        for future in futures:
+            future.cancel()
+        with database:
+            database.execute("UPDATE captures SET state='pending' WHERE state='downloading'")
+        raise
+    finally:
+        client.close()
