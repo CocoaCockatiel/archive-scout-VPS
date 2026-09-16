@@ -1,56 +1,42 @@
-Archive Scout 1.0.6 source validation
-Date: 2026-09-15
+Archive Scout 1.0.6.1 source validation
+Date: 2026-09-16
 
 Release scope
-- Maximum-recall scanning, durable stage-based resume, storage efficiency, auditable skip/error state, URL-derived filenames, Search with Hitlist, and per-page indexing checkpoints.
-- Automatic indexing retains the v1.0.5 Timemap profile: pageSize=9, ten bounded workers, 0.75-second shared CDX request spacing, rolling queues up to 1,000 pages, and resume-key/date-window recovery fallbacks.
-- Database schema version 8 migrates supported v1.0.x projects non-destructively.
+- Focused performance hotfix on top of v1.0.6; schema remains version 8.
+- Restores the v1.0.5 acquisition-first replay philosophy: 10 download workers and the configured 0.125-second shared replay start spacing are no longer gated by scanner backlog.
+- Keeps every v1.0.6 recall, durable-resume, Search with Hitlist, URL-derived filename, skip/error audit, storage-compaction, macOS process-name, and per-page index checkpoint feature.
+- Automatic indexing remains the v1.0.5/v1.0.6 Timemap profile: pageSize=9, 10 bounded workers, 0.75-second CDX request spacing, rolling queues up to 1,000 pages, and resume-key/date-window recovery fallbacks.
+
+Performance hotfix details
+- SQLite WAL synchronous mode restored from FULL to NORMAL.
+- WAL auto-checkpoint restored from 4,000 to 10,000 pages.
+- captures.local_path now has an index so URL-derived path collision checks do not scan giant capture tables.
+- Pre-download state transitions are batched before worker submission.
+- Scanner backlog is durable in SQLite and may grow independently while replay acquisition continues; only a bounded local scan window is kept in memory.
+- Scanner polling is non-blocking while acquisition still has work.
+- Exact-byte CoW deduplication remains available through Compact Project but is removed from the text/media replay hot path.
+- Network response hashing remains one-pass while response bytes are streamed to disk.
+- Progress reports replay-start, completed-download, scan, and scan-backlog rates separately.
 
 Local automated validation
-- 211 automated tests ran successfully; 3 were skipped in this container (2 optional native-accelerator execution tests because ahocorasick-rs/selectolax wheels are not installed here, and 1 display-dependent Tk theme test).
+- 213 automated tests passed; 3 skipped in this container (optional native ahocorasick-rs/selectolax execution tests and one display-dependent Tk theme test).
+- Added a regression test that blocks a one-worker scanner while replay acquisition continues; at least 30 of 40 replay requests must start before scanner release, proving scanner backlog cannot throttle the network feeder.
+- Added checks for WAL synchronous=NORMAL, wal_autocheckpoint=10000, and captures_local_path_idx.
 - Python compileall passed for archive_scout, tests, scripts, run_app.py, and run_cli.py.
 - scripts/build_linux.sh and scripts/build_macos.sh passed bash syntax validation.
 - git diff --check passed.
-- Offline benchmark completed with zero HTTP attempts.
+- Offline 100k benchmark completed with zero HTTP attempts.
 - Native multi-platform GitHub Actions/build smoke tests must still run on the exact release commit before publishing platform binaries.
 
-Recall/storage/resume coverage includes
-- full-source search beyond the former 500,000-character cutoff;
-- UTF-16 textual detection/decoding and common escape normalization;
-- ambiguous MIME/extension classification that avoids silent text skips;
-- direct Aho-Corasick literal scoring parity;
-- resumable Search with Hitlist URL/local-content coverage;
-- explicit non-text/URL-filter skip accounting separate from Open Errors;
-- keyword_urls -> all_text requeue behavior;
-- URL-derived portable text/media filenames;
-- downloaded_unscanned recovery state and per-page index completion tables;
-- compact/contentless FTS and legacy-body compaction without deleting canonical capture files;
-- macOS outer Archive Scout.app / inner Wayback Machine Downloader packaging identity.
-
 Offline 100k benchmark on this container
-- parse_cdx_chunks: 2.330972 s
-- literal_prefilter: 0.528872 s
-- literal_scoring: 0.511527 s
-- parse_and_upsert_cdx_chunks: 3.897029 s
-- repeat_parse_and_noop_upsert: 3.133141 s (0 unchanged writes)
-- browse_500: 0.011877 s
-- export_json: 0.711381 s
+- parse_cdx_chunks: 2.433378 s
+- literal_prefilter: 0.609290 s
+- literal_scoring: 0.630386 s
+- parse_and_upsert_cdx_chunks: 4.184278 s
+- repeat_parse_and_noop_upsert: 3.292400 s (0 unchanged writes)
+- browse_500: 0.008509 s
+- export_json: 0.035478 s
 - HTTP attempts: 0
 
-Reference v1.0.5 local benchmark from the preceding release
-- parse_cdx_chunks: 2.282789 s
-- literal_prefilter: 0.522803 s
-- literal_scoring: 0.498874 s
-- parse_and_upsert_cdx_chunks: 3.859442 s
-- repeat_parse_and_noop_upsert: 3.079621 s
-- browse_500: 0.010167 s
-- export_json: 0.671984 s
-
-The v1.0.6 index path remains within the same performance range while adding per-page durability.
-
-Packaging validation
-- Python wheel built successfully as archive_scout-1.0.6-py3-none-any.whl.
-- Wheel SHA256: 622ed0181e33d801e122be52f458fdec9a27b2544d545690a885bfdd9dc9cb4c.
-- Unified v1.0.6 patch passed git apply --check and a real apply against the exact reconstructed v1.0.5 baseline commit e7a1302.
-- Every file produced by the applied unified patch matched the v1.0.6 working implementation byte-for-byte.
-- The replacement-files ZIP contained exactly the changed-file list and every file matched the v1.0.6 working implementation byte-for-byte.
+Build note
+- Wheel build could not be repeated in this isolated container because the Python build frontend is not installed and the environment has no Internet access to fetch setuptools/build dependencies. Source compilation and the complete local test suite passed.

@@ -37,7 +37,7 @@ from ..site_status import host_from_url, should_surface_site_issue, site_issue_m
 from ..scanning.jobs import ScanJob
 from ..scanning.keywords import compile_prefilter
 from ..scanning.scoring import analyze_content, prepare_analysis_fields
-from ..storage import capture_path as url_capture_path, deduplicate_exact_file, sha256_file
+from ..storage import capture_path as url_capture_path, sha256_file
 from ..utils import hash_text, normalize_search, utc_now
 from .rate_limit import SharedFixedRateLimiter, shared_host_gate
 from .validation import classify_exception
@@ -422,7 +422,13 @@ def download_archive(
     scan_futures: dict[concurrent.futures.Future, dict[str, object]] = {}
     waiting_scan: deque[dict[str, object]] = deque()
     rows_exhausted = False
-    completed_downloads = completed_scans = matched = failures = 0
+    submitted_downloads = completed_downloads = downloaded_for_scan = completed_scans = matched = failures = 0
+    resolved_scan_items = 0
+    initial_scan_backlog = int(database.execute(
+        "SELECT COUNT(*) FROM captures WHERE state='downloaded_unscanned' AND local_path IS NOT NULL"
+        + (" AND query_signature=?" if not capture_ids else ""),
+        (() if capture_ids else (cdx_query_signature(config),)),
+    ).fetchone()[0]) if not capture_ids else 0
     started = time.monotonic()
 
     def emit_progress() -> None:
@@ -431,54 +437,102 @@ def download_archive(
         elapsed = max(0.001, time.monotonic() - started)
         done = completed_scans + failures
         cumulative = min(cumulative_total, completed_before + done)
+        backlog = max(0, initial_scan_backlog + downloaded_for_scan - resolved_scan_items)
         callback(ProgressEvent(
             "download",
-            f"Downloaded {completed_downloads:,}; scanned {completed_scans:,}; matches {matched:,}; "
-            f"errors {failures:,}; {done/elapsed:.1f}/s; project {cumulative:,}/{cumulative_total:,}",
+            f"Replay starts {submitted_downloads:,} ({submitted_downloads/elapsed:.1f}/s); "
+            f"downloads {completed_downloads:,} ({completed_downloads/elapsed:.1f}/s); "
+            f"scanned {completed_scans:,} ({completed_scans/elapsed:.1f}/s); backlog {backlog:,}; "
+            f"matches {matched:,}; errors {failures:,}; project {cumulative:,}/{cumulative_total:,}",
             cumulative, cumulative_total,
-            {"downloaded": completed_downloads, "scanned": completed_scans, "matched": matched,
-             "failures": failures, "download_workers": config.workers, "scan_workers": scan_workers},
+            {"replay_started": submitted_downloads, "replay_start_rate": submitted_downloads / elapsed,
+             "downloaded": completed_downloads, "download_rate": completed_downloads / elapsed,
+             "scanned": completed_scans, "scan_rate": completed_scans / elapsed,
+             "scan_backlog": backlog, "matched": matched, "failures": failures,
+             "download_workers": config.workers, "scan_workers": scan_workers},
         ))
 
+    queued_scan_ids: set[int] = set()
+
+    def fill_waiting_from_database() -> None:
+        capacity = max(0, scan_limit - len(waiting_scan) - len(scan_futures))
+        if capacity <= 0:
+            return
+        for pending_row in _pending_scan_rows(database, config, capture_ids):
+            capture_id = int(pending_row["id"])
+            if capture_id in queued_scan_ids:
+                continue
+            queued_scan_ids.add(capture_id)
+            waiting_scan.append(dict(pending_row))
+            capacity -= 1
+            if capacity <= 0:
+                break
+
     def schedule_waiting(scan_pool: concurrent.futures.ThreadPoolExecutor) -> None:
-        while waiting_scan and len(scan_futures) < scan_limit:
+        if len(waiting_scan) + len(scan_futures) < scan_limit:
+            fill_waiting_from_database()
+        slots = max(0, scan_limit - len(scan_futures))
+        items: list[dict[str, object]] = []
+        while waiting_scan and len(items) < slots:
             item = waiting_scan.popleft()
-            capture_id = int(item["id"])
+            queued_scan_ids.discard(int(item["id"]))
+            items.append(item)
+        if not items:
+            return
+        now = utc_now()
+        with database:
+            database.executemany(
+                "UPDATE captures SET state='scanning',updated_at=? WHERE id=?",
+                ((now, int(item["id"])) for item in items),
+            )
+        for item in items:
             path = Path(str(item["local_path"]))
-            with database:
-                database.execute("UPDATE captures SET state='scanning',updated_at=? WHERE id=?", (utc_now(), capture_id))
             future = scan_pool.submit(_scan_saved_capture, item, path, config, jobs)
             scan_futures[future] = item
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=config.workers, thread_name_prefix="archive-download") as download_pool, concurrent.futures.ThreadPoolExecutor(max_workers=scan_workers, thread_name_prefix="archive-scan") as scan_pool:
-            # Resume durable downloaded-but-unscanned work before requesting more bytes.
-            for row in _pending_scan_rows(database, config, capture_ids):
-                waiting_scan.append(dict(row))
-                if len(waiting_scan) >= scan_limit:
-                    break
+            # Scanner backlog is durable in SQLite; keep only a bounded local window.
+            fill_waiting_from_database()
             schedule_waiting(scan_pool)
 
             while True:
                 if stop_event.is_set():
                     raise Stopped
 
-                # Feed replay workers only while scanner backlog remains bounded.
-                while not rows_exhausted and len(download_futures) < download_limit and (len(waiting_scan) + len(scan_futures)) < scan_limit * 2:
-                    try:
-                        row = next(row_iter)
-                    except StopIteration:
-                        rows_exhausted = True
-                        break
-                    row_dict = dict(row)
-                    path = _allocate_capture_path(database, config.output_dir, row)
-                    row_dict["assigned_path"] = str(path)
-                    with database:
-                        database.execute(
-                            "UPDATE captures SET state='downloading',local_path=?,download_attempts=download_attempts+1,updated_at=? WHERE id=?",
-                            (str(path), utc_now(), int(row["id"])),
-                        )
-                    download_futures[download_pool.submit(_download_capture, row_dict, path, config, client)] = row_dict
+                # Keep the v1.0.5 acquisition envelope independent of local scanner speed.
+                # Scanner backlog lives durably in SQLite and is allowed to grow; only
+                # disk/network failures or Wayback's shared host gate may slow replay.
+                slots = download_limit - len(download_futures)
+                if not rows_exhausted and slots > 0:
+                    batch: list[tuple[dict[str, object], Path]] = []
+                    reserved_paths: set[str] = set()
+                    while len(batch) < slots:
+                        try:
+                            row = next(row_iter)
+                        except StopIteration:
+                            rows_exhausted = True
+                            break
+                        row_dict = dict(row)
+                        path = _allocate_capture_path(database, config.output_dir, row)
+                        if str(path) in reserved_paths:
+                            path = url_capture_path(
+                                config.output_dir, str(row["timestamp"]), str(row["original_url"]),
+                                disambiguate=True,
+                            )
+                        reserved_paths.add(str(path))
+                        row_dict["assigned_path"] = str(path)
+                        batch.append((row_dict, path))
+                    if batch:
+                        now = utc_now()
+                        with database:
+                            database.executemany(
+                                "UPDATE captures SET state='downloading',local_path=?,download_attempts=download_attempts+1,updated_at=? WHERE id=?",
+                                ((str(path), now, int(item["id"])) for item, path in batch),
+                            )
+                        for item, path in batch:
+                            download_futures[download_pool.submit(_download_capture, item, path, config, client)] = item
+                            submitted_downloads += 1
 
                 if download_futures:
                     done_downloads, _ = concurrent.futures.wait(
@@ -498,30 +552,21 @@ def download_archive(
                             continue
                         path = Path(result["path"])
                         content_hash = str(result["content_hash"])
-                        # Best-effort exact-byte CoW dedupe. Never hard-link.
-                        storage_method = "file"
-                        if config.compact_storage:
-                            existing = database.execute(
-                                """SELECT local_path FROM captures WHERE id<>? AND content_hash=? AND local_path IS NOT NULL LIMIT 1""",
-                                (capture_id, content_hash),
-                            ).fetchone()
-                            if existing and Path(str(existing["local_path"])).is_file():
-                                storage_method = deduplicate_exact_file(path, Path(str(existing["local_path"])))
+                        # Acquisition first: physical exact-byte CoW dedupe is intentionally
+                        # deferred to Compact Project / idle maintenance, never the replay hot path.
                         with database:
                             database.execute(
                                 """UPDATE captures SET state='downloaded_unscanned',local_path=?,content_hash=?,http_status=?,final_url=?,bytes_saved=?,skip_reason=NULL,classifier_revision=?,updated_at=? WHERE id=?""",
                                 (str(path), content_hash, result["http_status"], result["final_url"], result["bytes_saved"], CLASSIFIER_REVISION, utc_now(), capture_id),
                             )
-                            database.execute(
-                                """INSERT INTO storage_objects(content_hash,canonical_path,size_bytes,reference_count,storage_method,updated_at)
-                                   VALUES(?,?,?,?,?,?)
-                                   ON CONFLICT(content_hash) DO UPDATE SET reference_count=storage_objects.reference_count+1,updated_at=excluded.updated_at""",
-                                (content_hash, str(path), int(result["bytes_saved"]), 1, storage_method, utc_now()),
-                            )
                         row.update(result)
                         row["local_path"] = str(path)
-                        waiting_scan.append(row)
+                        # Keep local scan memory bounded. If full, SQLite remains the queue.
+                        if len(waiting_scan) + len(scan_futures) < scan_limit:
+                            queued_scan_ids.add(capture_id)
+                            waiting_scan.append(row)
                         completed_downloads += 1
+                        downloaded_for_scan += 1
                     except RateLimitDeferred:
                         with database:
                             database.execute("UPDATE captures SET state='pending',updated_at=? WHERE id=?", (utc_now(), capture_id))
@@ -539,8 +584,9 @@ def download_archive(
                 schedule_waiting(scan_pool)
 
                 if scan_futures:
+                    scan_timeout = 0.0 if download_futures or not rows_exhausted else 0.05
                     done_scans, _ = concurrent.futures.wait(
-                        tuple(scan_futures), timeout=0.05, return_when=concurrent.futures.FIRST_COMPLETED
+                        tuple(scan_futures), timeout=scan_timeout, return_when=concurrent.futures.FIRST_COMPLETED
                     )
                 else:
                     done_scans = set()
@@ -563,9 +609,11 @@ def download_archive(
                                 continue
                             if outcome.get("kind") == "non_text":
                                 mark_capture_skipped(database, capture_id, "sniffed_non_text", CLASSIFIER_REVISION)
+                                resolved_scan_items += 1
                                 continue
                             save_success(database, outcome)
                             completed_scans += 1
+                            resolved_scan_items += 1
                             matched += int(any(
                                 int(analysis.get("score") or 0) >= config.minimum_score
                                 and not analysis.get("excluded") and not analysis.get("required_missing")
@@ -576,10 +624,9 @@ def download_archive(
                 schedule_waiting(scan_pool)
 
                 if rows_exhausted and not download_futures and not waiting_scan and not scan_futures:
-                    # There may be additional durable scan rows not initially loaded.
-                    extra = list(_pending_scan_rows(database, config, capture_ids))[:scan_limit]
-                    if extra:
-                        waiting_scan.extend(dict(row) for row in extra)
+                    # Drain any durable scanner backlog after acquisition has already finished.
+                    fill_waiting_from_database()
+                    if waiting_scan:
                         schedule_waiting(scan_pool)
                         continue
                     break

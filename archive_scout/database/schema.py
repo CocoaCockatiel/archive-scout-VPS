@@ -779,6 +779,9 @@ def initialize_schema(database: sqlite3.Connection) -> None:
             raise RuntimeError(f"unsupported Archive Scout schema version: {version}")
         else:
             database.executescript(BASE_SCHEMA_SQL)
+    # v1.0.6.1: URL-derived path collision checks are on the replay hot path.
+    # Create this after older-schema migrations have added captures.local_path.
+    database.execute("CREATE INDEX IF NOT EXISTS captures_local_path_idx ON captures(local_path)")
     try:
         # v1.0.6 uses a contentless FTS5 index. The canonical replay payload
         # remains on disk, so FTS stores only its inverted token index rather

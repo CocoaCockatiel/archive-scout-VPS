@@ -2,13 +2,13 @@
 
 Archive Scout is a cross-platform desktop research workspace for indexing, downloading, searching, reviewing, reconstructing, and analyzing public captures from the Internet Archive's Wayback Machine.
 
-Archive Scout 1.0.6 is the maximum-recall, durable-resume, and storage-efficiency release. It keeps the v1.0.5 Timemap-first indexing envelope while separating replay downloading from local scanning, preserving canonical replay payloads for future rescans, adding resumable Search with Hitlist, making skip/error state auditable, and reducing redundant on-disk/database storage.
+Archive Scout 1.0.6.1 is the high-throughput hotfix for the maximum-recall, durable-resume, and storage-efficiency 1.0.6 release. It keeps the v1.0.5 Timemap-first indexing envelope while separating replay downloading from local scanning, preserving canonical replay payloads for future rescans, adding resumable Search with Hitlist, making skip/error state auditable, and reducing redundant on-disk/database storage.
 
 ## Downloads
 
-- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6/ArchiveScout-Windows-x64.zip)
-- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6/ArchiveScout-Linux-x64.zip)
-- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6/ArchiveScout-macOS-Universal.zip)
+- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.1/ArchiveScout-Windows-x64.zip)
+- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.1/ArchiveScout-Linux-x64.zip)
+- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.1/ArchiveScout-macOS-Universal.zip)
 
 ## Core workflow
 

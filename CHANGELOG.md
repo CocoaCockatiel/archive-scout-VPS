@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.6.1
+
+- Restored the v1.0.5 high-throughput replay philosophy: ten download workers at the configured 0.125-second shared start spacing are no longer throttled by local scanner backlog.
+- Returned SQLite WAL durability to `synchronous=NORMAL` and the 10,000-page auto-checkpoint profile; durable file/state reconciliation still preserves restart safety.
+- Batched pre-download state transitions and added an index on `captures.local_path` so URL-derived collision checks do not scan huge capture tables.
+- Kept scanner memory bounded while allowing downloaded-but-unscanned work to accumulate durably in SQLite and drain locally after acquisition finishes.
+- Deferred exact-byte CoW deduplication for text and media to Compact Project / maintenance instead of performing filesystem compaction in the replay hot path.
+- Progress now exposes replay-start, download, scan, and backlog rates separately so network throughput is distinguishable from local CPU throughput.
+- Kept all v1.0.6 recall, URL-filename, hitlist, crash-recovery, storage-compaction, dashboard, and indexing-checkpoint features.
+
 ## 1.0.6
 
 - Split Wayback replay acquisition from local parsing/scanning so ten replay workers remain focused on retrieval while a separate CPU-oriented scanner pool handles saved captures. Downloaded payloads are checkpointed as `downloaded_unscanned` before analysis, allowing restart/reboot recovery without repeating completed network work.

@@ -17,7 +17,7 @@ from ..downloads.validation import classify_exception
 from ..content import classify_replay_content
 from ..events import ProgressEvent, Stopped
 from ..site_status import host_from_url, should_surface_site_issue, site_issue_message
-from ..storage import url_filename, media_path as storage_media_path, sha256_file, deduplicate_exact_file
+from ..storage import url_filename, media_path as storage_media_path, sha256_file
 from ..utils import utc_now
 from .indexer import media_query_signature
 
@@ -269,23 +269,11 @@ def download_media(
                     row = futures.pop(future)
                     try:
                         result = future.result()
-                        storage_method = "file"
-                        if config.compact_storage:
-                            existing = database.execute(
-                                "SELECT path FROM media_captures WHERE id<>? AND content_hash=? AND path IS NOT NULL LIMIT 1",
-                                (int(result["id"]), str(result["hash"])),
-                            ).fetchone()
-                            if existing and Path(str(existing["path"])).is_file():
-                                storage_method = deduplicate_exact_file(Path(result["path"]), Path(str(existing["path"])))
+                        # Acquisition first: exact-byte CoW dedupe remains available through
+                        # Compact Project, but never blocks the high-throughput replay path.
                         with database:
                             save_media_success(
                                 database, result["id"], result["path"], result["bytes"], result["hash"], result["status"], result["final_url"]
-                            )
-                            database.execute(
-                                """INSERT INTO storage_objects(content_hash,canonical_path,size_bytes,reference_count,storage_method,updated_at)
-                                   VALUES(?,?,?,?,?,?)
-                                   ON CONFLICT(content_hash) DO UPDATE SET reference_count=storage_objects.reference_count+1,updated_at=excluded.updated_at""",
-                                (str(result["hash"]), str(result["path"]), int(result["bytes"]), 1, storage_method, utc_now()),
                             )
                     except RateLimitDeferred:
                         stop_event.set()

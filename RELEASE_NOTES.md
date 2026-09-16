@@ -1,3 +1,9 @@
+# Archive Scout 1.0.6.1
+
+Archive Scout 1.0.6.1 is a focused throughput hotfix for 1.0.6. It preserves the maximum-recall scanner, durable stage-based resume, Search with Hitlist, URL-derived filenames, storage compaction, auditable skip/error state, and per-page indexing checkpoints while restoring v1.0.5-style replay acquisition speed.
+
+The replay path is again acquisition-first: ten workers and the configured 0.125-second shared request-start spacing run independently from scanner backlog. Downloaded captures are durably marked `downloaded_unscanned`; local scanners can catch up after acquisition instead of throttling Wayback retrieval. SQLite returns to WAL + `synchronous=NORMAL`, collision lookup uses an indexed `local_path`, and physical CoW deduplication is deferred to Compact Project rather than blocking downloads.
+
 # Archive Scout 1.0.6
 
 Archive Scout 1.0.6 is the maximum-recall, durable-resume, and storage-efficiency release. It keeps the fast Timemap acquisition model from 1.0.5 while separating replay downloading from local analysis so network throughput is no longer tied to HTML parsing and scoring.

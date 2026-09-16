@@ -47,12 +47,12 @@ def open_database(root: Path, migrate: bool = True) -> sqlite3.Connection:
     try:
         database.row_factory = sqlite3.Row
         database.execute("PRAGMA journal_mode=WAL")
-        database.execute("PRAGMA synchronous=FULL")
+        database.execute("PRAGMA synchronous=NORMAL")
         database.execute("PRAGMA foreign_keys=ON")
         database.execute("PRAGMA temp_store=MEMORY")
         database.execute("PRAGMA cache_size=-65536")
         database.execute("PRAGMA mmap_size=268435456")
-        database.execute("PRAGMA wal_autocheckpoint=4000")
+        database.execute("PRAGMA wal_autocheckpoint=10000")
         database.execute("PRAGMA journal_size_limit=67108864")
         database.execute("PRAGMA busy_timeout=60000")
         initialize_schema(database)
