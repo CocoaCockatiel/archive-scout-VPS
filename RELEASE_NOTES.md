@@ -1,3 +1,31 @@
+# Archive Scout 1.0.6.6
+
+Archive Scout 1.0.6.6 replaces the automatic indexing recovery behavior with a simpler native Timemap JSON pipeline based on the attached high-throughput Wayback downloader. The previous engine could keep successful pages but still abandon the entire numbered-page plan after one page failed twice, then rebuild that year as slower resume-key windows. On large targets that could repeat substantial work and make indexing appear nearly unusable.
+
+## Native Timemap indexing
+
+- Automatic and Timemap modes use only `https://web.archive.org/web/timemap/json` for numbered paging. A page is no longer sent through endpoints with different pagination/representation semantics.
+- Timemap page counts and numbered pages are native JSON operations. There is no text-format request or text fallback for a numbered page.
+- The page-count request receives at least five attempts before Archive Scout concludes that pagination is unavailable and falls back to resumable CDX traversal.
+- Page requests keep the established `pageSize=9`, ten-worker, 0.75-second shared request-start spacing, and 1,000-page rolling scheduler.
+- Page-count queries omit unused capture fields. Numbered pages request only timestamp, original URL, MIME type, status, digest, and length; the resume-only URL key is not transferred.
+
+## Isolated recovery and visible progress
+
+- Every failed page is tracked independently in the existing durable `retry_pages` and `page_failures` state.
+- One bad page receives five attempts without resetting the year, splitting its date range, or repeating completed Timemap pages.
+- If a page remains unavailable, Archive Scout pauses with all successful page checkpoints intact and saves only the exact failed page queue for Resume.
+- Resume continues those page numbers directly. Resume-key traversal is reserved for genuinely unsupported pagination or a repeatedly unavailable page-count operation.
+- The Activity/progress stream now updates while pages inside a 1,000-page block complete, including completed-page and capture counts.
+- Direct media indexing uses the same behavior.
+
+## Compatibility
+
+- Database schema remains version 8; no project migration is required.
+- Existing v1.0.6.x page checkpoints, captures, unfinished numbered queues, downloads, and media remain compatible.
+- Replay downloading and scanning behavior are unchanged.
+- Release/package/workflow/Windows executable metadata reports 1.0.6.6.
+
 # Archive Scout 1.0.6.5
 
 Archive Scout 1.0.6.5 fixes the repeated `CDX text response was incomplete; retrying as JSON` slowdown during automatic indexing. The message was usually not evidence that Wayback had truncated the response. Archive Scout was asking the path-specific Timemap JSON service for line-oriented text first; that service could return valid JSON anyway, which the text parser rejected before downloading the same numbered page again.

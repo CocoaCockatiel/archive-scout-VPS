@@ -9,7 +9,12 @@ from unittest.mock import patch
 
 from archive_scout.cdx.client import parse_cdx_text_rows
 from archive_scout.cdx.indexer import PendingWindow, _resolve_strategy, index_archive
-from archive_scout.cdx.parameters import build_cdx_params, preferred_index_strategy
+from archive_scout.cdx.parameters import (
+    build_cdx_params,
+    build_num_pages_params,
+    build_paged_cdx_params,
+    preferred_index_strategy,
+)
 from archive_scout.config import MediaConfig, NetworkConfig, ProjectConfig, load_project_config
 from archive_scout.database.connection import open_database
 from archive_scout.database.repositories import cdx_row_to_dict
@@ -68,6 +73,21 @@ class FinalPerformanceTests(unittest.TestCase):
             config = self._config(Path(temp), strategy="auto")
             self.assertEqual(preferred_index_strategy(config, "example.com/*"), "paged")
 
+    def test_timemap_count_and_pages_use_minimal_native_json_fields(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config = self._config(Path(temp))
+            count = dict(build_num_pages_params(
+                config, "example.com/*", "20010101000000", "20011231235959", 9
+            ))
+            page = dict(build_paged_cdx_params(
+                config, "example.com/*", "20010101000000", "20011231235959", 3, 9
+            ))
+            self.assertNotIn("fl", count)
+            self.assertEqual(
+                page["fl"],
+                "timestamp,original,mimetype,statuscode,digest,length",
+            )
+            self.assertNotIn("urlkey", page["fl"])
     def test_unfinished_numbered_queue_stays_parallel_in_auto_mode(self):
         with tempfile.TemporaryDirectory() as temp:
             config = self._config(Path(temp))
@@ -105,6 +125,8 @@ class FinalPerformanceTests(unittest.TestCase):
             self.assertEqual(count["pageSize"], "9")
             self.assertEqual(page["pageSize"], "9")
             self.assertEqual(page["page"], "3")
+            self.assertNotIn("fl", count)
+            self.assertEqual(page["fl"], "timestamp,original,mimetype,statuscode,digest,length")
 
     def test_unfinished_media_numbered_queue_stays_parallel(self):
         with tempfile.TemporaryDirectory() as temp:

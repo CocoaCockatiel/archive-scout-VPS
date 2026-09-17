@@ -16,7 +16,9 @@ from ..cdx.client import CDXRow, HttpClient, PermanentRequestError, RateLimitDef
 from ..cdx.indexer import (
     PendingWindow,
     PagedBatch,
+    PAGED_PAGE_FAILURE_LIMIT,
     PAGED_PIPELINE_PAGES,
+    _request_paged_count,
     _select_page_batch,
     cdx_response_budget,
     decode_plan,
@@ -33,7 +35,6 @@ from ..cdx.parameters import (
     cdx_query_signatures,
     cdx_target_value,
     cdx_year_window,
-    parse_num_pages,
     preferred_index_strategy,
 )
 from ..config import ProjectConfig
@@ -163,7 +164,11 @@ def build_media_num_pages_params(
     page_blocks: int,
 ):
     params = build_media_params(config, pattern, start, end, extensions=extensions)
-    params = [(key, value) for key, value in params if key not in {"limit", "showResumeKey", "resumeKey"}]
+    params = [
+        (key, value)
+        for key, value in params
+        if key not in {"limit", "showResumeKey", "resumeKey", "fl"}
+    ]
     params.append(("showNumPages", "true"))
     blocks = int(page_blocks)
     if blocks <= 0:
@@ -183,6 +188,10 @@ def build_media_paged_params(
 ):
     params = build_media_params(config, pattern, start, end, extensions=extensions)
     params = [(key, value) for key, value in params if key not in {"limit", "showResumeKey", "resumeKey"}]
+    params = [
+        (key, "timestamp,original,mimetype,statuscode,digest,length") if key == "fl" else (key, value)
+        for key, value in params
+    ]
     params.append(("page", str(max(0, page))))
     blocks = int(page_blocks)
     if blocks <= 0:
@@ -488,13 +497,13 @@ def _request_media_paged_batch(
     endpoints = cdx_paged_endpoints(config)
     network = config.network.normalized()
     if current.page_count < 0:
-        payload = client.get_cdx_any(
+        current.page_count = _request_paged_count(
+            client,
             endpoints,
             build_media_num_pages_params(config, target, current.start, current.end, extensions, current.page_blocks),
-            max_bytes=1024 * 1024,
-            prefer_text=False,
+            config,
+            stop_event,
         )
-        current.page_count = parse_num_pages(payload)
         current.page = min(current.page, current.page_count)
         current.retry_pages = [page for page in current.retry_pages if page < current.page_count]
     if current.page >= current.page_count and not current.retry_pages:
@@ -520,6 +529,7 @@ def _request_media_paged_batch(
         workers=page_workers,
         max_bytes=(192 * 1024 * 1024 if current.page_blocks <= 0 else max(64 * 1024 * 1024, current.page_blocks * 12 * 1024 * 1024)),
         prefer_text=False,
+        json_only=True,
     ):
         if result.succeeded and consume_success is not None:
             consume_success(result)
@@ -705,6 +715,8 @@ def index_direct_media(
                     accepted_count = 0
                     changed = 0
                     write_seconds = 0.0
+                    batch_pages_done = 0
+                    last_page_progress = time.monotonic()
 
                     completed_pages = {
                         int(row[0]) for row in database.execute(
@@ -715,7 +727,7 @@ def index_direct_media(
                     }
 
                     def store_completed_media_page(result: PageFetchResult) -> None:
-                        nonlocal received, accepted_count, changed, write_seconds
+                        nonlocal received, accepted_count, changed, write_seconds, batch_pages_done, last_page_progress
                         page_received = len(result.rows)
                         accepted = _accept_media_rows(result.rows, media)
                         write_started = time.monotonic()
@@ -732,6 +744,22 @@ def index_direct_media(
                         write_seconds += time.monotonic() - write_started
                         received += page_received
                         accepted_count += len(accepted)
+                        batch_pages_done += 1
+                        now = time.monotonic()
+                        if callback and (
+                            now - last_page_progress >= 1.0
+                            or len(completed_pages) >= current.page_count
+                        ):
+                            callback(
+                                ProgressEvent(
+                                    "media_index",
+                                    f"{target} {label}: completed {len(completed_pages):,}/{current.page_count:,} Timemap pages; "
+                                    f"this block finished {batch_pages_done:,} pages and accepted {accepted_count:,} media captures",
+                                    completed,
+                                    total,
+                                )
+                            )
+                            last_page_progress = now
                         result.rows.clear()
                         accepted.clear()
 
@@ -784,36 +812,6 @@ def index_direct_media(
                         for item in failures
                     ):
                         raise failure_exc
-                    if max(current.page_failures.values(), default=0) >= 2:
-                        current.strategy = "resume"
-                        current.pagination_supported = False
-                        current.page = 0
-                        current.page_count = -1
-                        current.resume_key = None
-                        current.retry_pages.clear()
-                        current.page_failures.clear()
-                        current.failures = 0
-                        current.page_size = max(100, target_config.page_size // 2)
-                        parts = split_window(current)
-                        if parts:
-                            for part in parts:
-                                part.strategy = "resume"
-                                part.pagination_supported = False
-                            plan.pending[0:1] = parts
-                            added = len(parts) - 1
-                            plan.planned += added
-                            total += added
-                        with database:
-                            record_recovery_event(
-                                database,
-                                "media_index",
-                                "slow_media_page_fallback",
-                                f"{target} {label}: one combined-media CDX page failed repeatedly; switching the saved window to smaller resume-key work.",
-                            )
-                            _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
-                        if callback:
-                            callback(ProgressEvent("media_index", f"One combined-media CDX page remained slow for {target} {label}; successful pages were kept and the remaining range was converted to smaller resumable windows.", completed, total))
-                        continue
                     if not successes and _pagination_unavailable(failure_exc):
                         current.pagination_supported = False
                         current.strategy = "resume"
@@ -830,6 +828,36 @@ def index_direct_media(
                     )
                     if permanent is not None:
                         raise permanent
+                    highest_page_failures = max(current.page_failures.values(), default=0)
+                    new_pages_remain = current.page < current.page_count
+                    if highest_page_failures >= PAGED_PAGE_FAILURE_LIMIT and (
+                        not successes or not new_pages_remain
+                    ):
+                        with database:
+                            error_id = record_error(
+                                database,
+                                "media_index",
+                                "timemap_media_pages_unavailable",
+                                f"{target} {label}: {len(current.retry_pages)} Timemap media page(s) remained unavailable "
+                                f"after {highest_page_failures} attempts: {failure_exc}",
+                                retryable=True,
+                            )
+                            record_recovery_event(
+                                database,
+                                "media_index",
+                                "timemap_media_page_queue_saved",
+                                f"{target} {label}: saved only the failed Timemap media pages for Resume.",
+                                details={"pages": current.retry_pages[:100], "attempts": highest_page_failures},
+                            )
+                            _save_media_state(
+                                database, target_id, year, state_signature,
+                                encode_plan(plan), False, seen, error_id,
+                            )
+                        raise ConnectivityPaused(
+                            f"{len(current.retry_pages)} Timemap media page(s) remained unavailable after "
+                            f"{highest_page_failures} attempts. Successful pages were preserved and only the exact "
+                            "failed media-page queue was saved for Resume."
+                        ) from failure_exc
                     with database:
                         record_recovery_event(
                             database,
@@ -842,6 +870,17 @@ def index_direct_media(
                     if successes:
                         if callback:
                             callback(ProgressEvent("media_index", f"Requeued {len(failures)} slow media page(s) while continuing with untouched pages.", completed, total))
+                        continue
+                    if completed_pages and not new_pages_remain:
+                        if callback:
+                            callback(
+                                ProgressEvent(
+                                    "media_index",
+                                    f"Retrying {len(current.retry_pages)} isolated Timemap media page(s); all successful pages remain checkpointed.",
+                                    completed,
+                                    total,
+                                )
+                            )
                         continue
                     error_id = _defer_media_window(
                         target_config, database, plan, current, target_id, year, state_signature,

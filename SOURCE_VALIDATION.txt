@@ -1,35 +1,48 @@
-Archive Scout 1.0.6.5 source validation
+Archive Scout 1.0.6.6 source validation
 Date: 2026-09-17
 
 Release scope
-- Fixes repeated "CDX text response was incomplete; retrying as JSON" messages and the duplicate numbered-page requests behind them.
-- Preserves v1.0.6.4 deterministic cross-platform download batching, v1.0.6.2 acquisition-only mode, v1.0.6.1 replay pacing, and v1.0.6 maximum-recall scanning.
+- Replaces fragile automatic indexing recovery with a reference-style native Timemap JSON pipeline.
+- Prevents one failed page from downgrading and replaying an otherwise successful year through broad resume-key windows.
+- Adds live page-level progress during the existing 1,000-page rolling schedule.
+- Applies the same correction to direct media indexing.
 - Database schema remains version 8. No destructive project migration is introduced.
 
-Root cause and correction
-- Automatic paging uses Wayback's /web/timemap/json endpoint first while the compact bulk-row client previously preferred line-oriented text for lower memory use.
-- The path-specific Timemap JSON endpoint can ignore output=txt and return valid JSON. The text parser rejected that body, reported it as incomplete, and fetched the same page again as JSON.
-- Path-specific Timemap endpoints now use their native representation first: /web/timemap/json uses JSON and /web/timemap/cdx uses line-oriented text.
-- Successful bodies are representation-sniffed. Valid JSON returned for a text request and valid text returned for a JSON request are parsed locally without a second network request.
-- Bodies that actually look like malformed/truncated JSON still enter the existing alternate-representation and endpoint-recovery path. The fix does not accept partial JSON as complete.
+Reference comparison
+- The attached Wayback downloader uses /web/timemap/json, pageSize=9, ten concurrent requests, an 80-requests/minute limiter, 1,000-page task groups, and five attempts per request.
+- Archive Scout retains that proven acquisition envelope while preserving durable SQLite page checkpoints, shared 429/503 handling, pause/resume state, classified errors, and per-project capture metadata.
+- Automatic numbered pages now use one native JSON endpoint and one representation per attempt. Generic resume-key CDX recovery remains separate.
 
-Performance and recovery invariants
-- A normal successful Timemap JSON numbered page now requires one request rather than a text request followed by a duplicate JSON request.
-- CDX worker count, shared 0.75-second request-start spacing, pageSize=9, rolling bounded scheduler, and response-memory bounds are unchanged.
-- Per-page completion checkpoints, isolated failed-page requeue, resume-key fallback, date-window subdivision, endpoint rotation, coordinated rate-limit handling, and pause/save semantics remain unchanged.
-- Existing projects and unfinished queues remain compatible.
+Request behavior
+- Timemap page counts omit the unused fl field.
+- Timemap numbered pages request timestamp, original, mimetype, statuscode, digest, and length. The resume-only urlkey field is omitted.
+- Page counts receive at least five native-JSON attempts for transient server/read failures before pagination fallback.
+- Complete multi-backend connection failures return immediately to the operation-wide connection circuit rather than multiplying one DNS/proxy/TLS outage by five.
+- A malformed or truncated numbered-page JSON body is rejected. It is never accepted as text and never triggers a text-format request for that page.
+
+Failure isolation and resume
+- Page failures remain in durable retry_pages/page_failures state while successful page rows and checkpoints commit atomically.
+- One page receives five attempts without resetting the numbered-page plan.
+- If an isolated page remains unavailable, Archive Scout pauses and saves only the exact failed page numbers. Resume continues those pages directly.
+- Resume-key traversal remains the fallback when pagination is unsupported or the page-count operation remains unavailable after its retry budget.
+- Existing v1.0.6.x numbered-page plans and completed index_pages/media_index_pages checkpoints remain compatible.
+
+Progress behavior
+- Main and direct-media indexing emit live progress during a 1,000-page scheduling block.
+- Progress includes completed Timemap pages, total Timemap pages, pages completed in the current block, and capture counts.
 
 Regression coverage
-- Native Timemap JSON is used first even when compact bulk indexing prefers text.
-- A valid Timemap JSON page completes with exactly one transport request.
-- Valid JSON returned contrary to a text request is parsed without refetching.
-- Valid text returned contrary to a JSON request is parsed without refetching.
-- Malformed JSON still retries using line-oriented text and retains the prior recovery behavior.
+- Native Timemap page failures produce exactly one JSON request per attempt and no text request.
+- Page counting receives five transient attempts.
+- A persistent isolated page is attempted five times, successful sibling pages remain stored, no resume-key request occurs, and only the failed page is saved.
+- Automatic paging uses only the native Timemap JSON endpoint.
+- Page-count and numbered-page parameter sets omit unnecessary fields.
+- Live page-progress events are emitted.
+- Main and media indexing continue to use bounded parallel paging and durable completion checkpoints.
 
 Local automated validation
-- Full suite: 228 tests run, 227 passed, 1 environment skip, 0 failed.
-- Focused CDX response-recovery suite: 7 tests passed.
+- Full suite: 232 tests run, 231 passed, 1 environment skip, 0 failed.
 - Python compileall passes for archive_scout, tests, and scripts.
+- The built package reports Archive Scout 1.0.6.6.
 - Offline 100,000-row benchmark completed with 100,000 inserts, zero duplicate work, zero HTTP attempts, and zero unchanged-row rewrites.
-- Release/package/workflow/Windows executable metadata target 1.0.6.5.
 - Native multi-platform GitHub Actions/build smoke tests must still run on the exact release commit before publishing platform binaries.

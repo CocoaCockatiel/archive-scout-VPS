@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.6.6
+
+- Rebuilds automatic numbered-page indexing around the attached reference downloader's proven Timemap model: native `/web/timemap/json`, `pageSize=9`, ten bounded workers, the existing 80-requests/minute envelope, and 1,000-page rolling scheduling.
+- Removes representation fallback from numbered Timemap pages. Each attempt is JSON only; malformed or truncated JSON is rejected and the exact page is retried rather than reissued as text.
+- Gives the small Timemap page-count request at least five native-JSON attempts before falling back to resume-key traversal.
+- Keeps page failures isolated. A single page now receives five attempts and remains in the durable `retry_pages` queue; it no longer converts the entire year to smaller resume-key windows or repeats already completed pages.
+- Pauses cleanly after the isolated-page retry limit while preserving all successful page checkpoints and only the exact failed page numbers for Resume.
+- Reduces Timemap request/response overhead: page counts no longer request unused row fields, and numbered pages omit the resume-only `urlkey` field.
+- Adds live indexing progress while a 1,000-page scheduling block is running instead of appearing frozen until the whole block finishes.
+- Applies the same native JSON, isolated-page retry, minimal-field, and live-progress model to direct media indexing.
+- Adds regression coverage for strict one-request JSON pages, five page-count attempts, exact failed-page persistence, minimal Timemap parameters, one-endpoint paging, and live progress.
+- Updates release metadata to 1.0.6.6. Database schema remains version 8.
+
 ## 1.0.6.5
 
 - Stops automatic Timemap indexing from requesting many valid numbered pages twice. The path-specific `/web/timemap/json` and `/web/timemap/cdx` services now use their native representation first instead of blindly following the generic text preference.

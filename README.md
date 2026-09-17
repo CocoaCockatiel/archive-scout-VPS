@@ -2,13 +2,13 @@
 
 Archive Scout is a cross-platform desktop research workspace for indexing, downloading, searching, reviewing, reconstructing, and analyzing public captures from the Internet Archive's Wayback Machine.
 
-Archive Scout 1.0.6.5 fixes a major indexing slowdown caused by representation mismatch at Wayback's path-specific Timemap endpoints. Automatic numbered-page indexing now requests Timemap JSON as JSON, recognizes the representation Wayback actually returned, and parses a valid mismatched response locally instead of downloading the same page again. Genuine malformed/truncated-response recovery, endpoint fallback, durable page checkpoints, and resume safety remain intact. This release also preserves the v1.0.6.4 cross-platform batching fixes, v1.0.6.2 acquisition-only workflow, v1.0.6.1 replay throughput, and v1.0.6 maximum-recall scanner.
+Archive Scout 1.0.6.6 replaces the fragile automatic indexing recovery path with a reference-style native Timemap JSON pipeline. Automatic indexing uses one Timemap JSON endpoint, `pageSize=9`, ten bounded workers, a 1,000-page rolling schedule, five page-count/page attempts, smaller paged response fields, live per-page progress, and durable isolated failed-page checkpoints. One slow page no longer converts an otherwise successful year into broad resume-key windows or repeats completed work. Resume-key traversal remains available when pagination itself is unsupported or page counting repeatedly fails.
 
 ## Downloads
 
-- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.5/ArchiveScout-Windows-x64.zip)
-- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.5/ArchiveScout-Linux-x64.zip)
-- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.5/ArchiveScout-macOS-Universal.zip)
+- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.6/ArchiveScout-Windows-x64.zip)
+- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.6/ArchiveScout-Linux-x64.zip)
+- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.6.6/ArchiveScout-macOS-Universal.zip)
 
 ## Core workflow
 

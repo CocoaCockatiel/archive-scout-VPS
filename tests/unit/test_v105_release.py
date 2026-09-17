@@ -26,7 +26,10 @@ class V105ReleaseTests(unittest.TestCase):
         self.assertEqual(config.network.page_blocks, 0)
         self.assertEqual(config.network.cdx_workers, 10)
         self.assertEqual(config.cdx_delay, 0.75)
-        self.assertIn('/web/timemap/json', cdx_paged_endpoints(config)[0])
+        self.assertEqual(
+            cdx_paged_endpoints(config),
+            ('https://web.archive.org/web/timemap/json',),
+        )
         self.assertEqual(effective_page_workers(10, 9), 10)
 
 

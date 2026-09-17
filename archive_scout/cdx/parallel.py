@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Iterator
 
 from ..events import Stopped
-from .client import CDXRow, HttpClient, request_cdx_rows
+from .client import CDXRow, HttpClient, request_cdx_json_rows, request_cdx_rows
 
 
 @dataclass(slots=True)
@@ -52,6 +52,7 @@ def iter_cdx_pages(
     workers: int,
     max_bytes: int = 64 * 1024 * 1024,
     prefer_text: bool = True,
+    json_only: bool = False,
 ) -> Iterator[PageFetchResult]:
     """Yield independent CDX pages as soon as each page completes.
 
@@ -69,13 +70,21 @@ def iter_cdx_pages(
             raise Stopped
         started = time.monotonic()
         try:
-            result = request_cdx_rows(
-                client,
-                endpoint_tuple,
-                params_for_page(page),
-                max_bytes=max_bytes,
-                prefer_text=prefer_text,
-            )
+            if json_only:
+                result = request_cdx_json_rows(
+                    client,
+                    endpoint_tuple,
+                    params_for_page(page),
+                    max_bytes=max_bytes,
+                )
+            else:
+                result = request_cdx_rows(
+                    client,
+                    endpoint_tuple,
+                    params_for_page(page),
+                    max_bytes=max_bytes,
+                    prefer_text=prefer_text,
+                )
             return PageFetchResult(page, result.rows, time.monotonic() - started)
         except Stopped:
             raise
@@ -114,6 +123,7 @@ def fetch_cdx_pages(
     workers: int,
     max_bytes: int = 64 * 1024 * 1024,
     prefer_text: bool = True,
+    json_only: bool = False,
 ) -> list[PageFetchResult]:
     """Compatibility wrapper returning deterministic page order."""
     results = list(
@@ -126,6 +136,7 @@ def fetch_cdx_pages(
             workers,
             max_bytes=max_bytes,
             prefer_text=prefer_text,
+            json_only=json_only,
         )
     )
     results.sort(key=lambda item: item.page)

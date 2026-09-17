@@ -7,9 +7,11 @@ import urllib.parse
 from archive_scout.cdx.client import (
     HttpClient,
     MalformedCDXResponse,
+    TransientRequestError,
     cdx_text_fallback_params,
     parse_cdx_text_response,
     parse_json_response,
+    request_cdx_json_rows,
 )
 from archive_scout.cdx.parameters import parse_cdx
 from archive_scout.downloads.rate_limit import FixedRateLimiter
@@ -170,6 +172,31 @@ class CDXResponseRecoveryTests(unittest.TestCase):
         self.assertEqual(len(result.rows), 1)
         self.assertEqual(result.rows[0][1], "http://example.com/")
         self.assertEqual(len(transport.urls), 1)
+
+    def test_native_timemap_page_never_reissues_malformed_json_as_text(self) -> None:
+        transport = SequenceTransport([b'[["timestamp","original"],[' ])
+        client = HttpClient(
+            FixedRateLimiter(0),
+            retries=1,
+            timeout=1,
+            user_agent="test",
+            stop_event=threading.Event(),
+            transport=transport,
+        )
+        with self.assertRaises(TransientRequestError):
+            request_cdx_json_rows(
+                client,
+                ("https://web.archive.org/web/timemap/json",),
+                [
+                    ("url", "example.com/*"),
+                    ("output", "json"),
+                    ("fl", "timestamp,original,mimetype,statuscode,digest,length"),
+                    ("page", "0"),
+                    ("pageSize", "9"),
+                ],
+            )
+        self.assertEqual(len(transport.urls), 1)
+        self.assertNotIn("output=txt", transport.urls[0])
 
     def test_page_count_text_fallback_is_numeric(self) -> None:
         params = cdx_text_fallback_params([

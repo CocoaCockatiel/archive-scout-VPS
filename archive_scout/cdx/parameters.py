@@ -117,15 +117,14 @@ def cdx_endpoints(config: ProjectConfig) -> tuple[str, ...]:
 
 
 def cdx_paged_endpoints(config: ProjectConfig) -> tuple[str, ...]:
-    from ..constants import CDX_URL, CDX_TIMEMAP_JSON_URL, CDX_TIMEMAP_URL
+    from ..constants import CDX_URL, CDX_TIMEMAP_JSON_URL
     mode = config.network.normalized().endpoint_mode
     if mode == "cdx":
         return (CDX_URL,)
-    if mode == "timemap":
-        return (CDX_TIMEMAP_JSON_URL, CDX_TIMEMAP_URL)
-    # Match the fast reference downloader: Timemap JSON is the normal numbered
-    # page source, with CDX retained as a transparent recovery path.
-    return (CDX_TIMEMAP_JSON_URL, CDX_URL, CDX_TIMEMAP_URL)
+    # Numbered automatic paging follows the reference downloader exactly: one
+    # native Timemap JSON service. A failed page remains one durable page retry;
+    # it is not silently reissued against different endpoint semantics.
+    return (CDX_TIMEMAP_JSON_URL,)
 
 
 def is_broad_cdx_query(config: ProjectConfig, target: str) -> bool:
@@ -154,7 +153,11 @@ def build_num_pages_params(
     page_blocks: int | None = None,
 ) -> list[tuple[str, str]]:
     params = build_cdx_params(config, target, start, end, page_size=config.page_size)
-    params = [(key, value) for key, value in params if key not in {"limit", "showResumeKey", "resumeKey"}]
+    params = [
+        (key, value)
+        for key, value in params
+        if key not in {"limit", "showResumeKey", "resumeKey", "fl"}
+    ]
     params.append(("showNumPages", "true"))
     blocks = config.network.normalized().page_blocks if page_blocks is None else int(page_blocks)
     # The Settings-tab default is 0, meaning "automatic".  Archive Scout's
@@ -176,6 +179,10 @@ def build_paged_cdx_params(
 ) -> list[tuple[str, str]]:
     params = build_cdx_params(config, target, start, end, page_size=config.page_size)
     params = [(key, value) for key, value in params if key not in {"limit", "showResumeKey", "resumeKey"}]
+    params = [
+        (key, "timestamp,original,mimetype,statuscode,digest,length") if key == "fl" else (key, value)
+        for key, value in params
+    ]
     params.append(("page", str(max(0, int(page)))))
     blocks = config.network.normalized().page_blocks if page_blocks is None else int(page_blocks)
     if blocks <= 0:
