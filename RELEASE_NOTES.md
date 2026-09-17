@@ -1,3 +1,22 @@
+# Archive Scout 1.0.6.5
+
+Archive Scout 1.0.6.5 fixes the repeated `CDX text response was incomplete; retrying as JSON` slowdown during automatic indexing. The message was usually not evidence that Wayback had truncated the response. Archive Scout was asking the path-specific Timemap JSON service for line-oriented text first; that service could return valid JSON anyway, which the text parser rejected before downloading the same numbered page again.
+
+## Indexing performance fix
+
+- `/web/timemap/json` now uses JSON first and `/web/timemap/cdx` uses line-oriented CDX first. The generic `/cdx/search/cdx` endpoint continues to honor Archive Scout's requested low-memory preference.
+- Archive Scout sniffs each successful body before parsing it. Valid JSON returned for a text request, or valid text returned for a JSON request, is parsed immediately without another network request.
+- A normal automatic Timemap page therefore requires one successful request instead of a text attempt followed by a duplicate JSON attempt.
+- Truly malformed or truncated responses still use the alternate-representation retry, endpoint fallback, bounded page requeue/subdivision, durable per-page checkpoints, and saved resume state.
+- The recovery message now says `malformed or truncated` and appears only after the returned body genuinely cannot be parsed in its actual representation.
+
+## Compatibility
+
+- Database schema remains version 8; no project migration is required.
+- Existing v1.0.6.x projects, page checkpoints, unfinished queues, downloaded captures, and media remain compatible.
+- CDX concurrency, the 0.75-second shared request-start spacing, `pageSize=9`, rolling bounded scheduler, and coordinated rate-limit handling are unchanged.
+- Release/package/workflow/Windows executable metadata now reports 1.0.6.5.
+
 # Archive Scout 1.0.6.4
 
 Archive Scout 1.0.6.4 is a cross-platform batching hotfix for the resource-efficiency release. It preserves the v1.0.6.3 CPU, memory, SQLite, and filesystem reductions while making download-only commit behavior deterministic on Windows as well as macOS and Linux. The **Index and download only (no scanning)** operation remains the leanest acquisition path and retains the same Wayback pacing, resume behavior, and Hitlist compatibility.

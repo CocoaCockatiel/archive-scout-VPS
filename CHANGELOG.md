@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.6.5
+
+- Stops automatic Timemap indexing from requesting many valid numbered pages twice. The path-specific `/web/timemap/json` and `/web/timemap/cdx` services now use their native representation first instead of blindly following the generic text preference.
+- Detects the representation Wayback actually returned. If an endpoint ignores `output=txt` or `output=json` but returns a valid body in the other representation, Archive Scout parses that body locally without issuing a duplicate network request.
+- Preserves malformed/truncated response recovery, alternate-representation retry, endpoint fallback, page checkpointing, and resume safety. The activity message now describes a genuinely malformed or truncated response instead of labeling every format mismatch as incomplete.
+- Adds regression coverage for Timemap JSON with text-preferred compact indexing and for valid JSON/text bodies returned contrary to the requested format.
+- Updates release, package, workflow, and Windows executable metadata to 1.0.6.5. Database schema remains version 8.
+
 ## 1.0.6.4
 
 - Makes download-only SQLite batching deterministic across Windows, macOS, and Linux instead of depending on how each platform wakes completed worker futures.

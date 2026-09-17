@@ -1,42 +1,35 @@
-Archive Scout 1.0.6.4 source validation
-Date: 2026-09-16
+Archive Scout 1.0.6.5 source validation
+Date: 2026-09-17
 
 Release scope
-- Preserves v1.0.6.2 Index and download only (no scanning), v1.0.6.1 acquisition-first replay pacing, and v1.0.6 maximum-recall scanning.
-- Reduces resource usage by removing redundant full-file reads, optional hot-path hashing, project-sized download-only queue materialization, per-completion SQLite commit pressure, and live dashboard recounts during active operations.
-- Fixes the Windows-only v1.0.6.3 regression where executor wake-up timing caused 33 download-only commits in the 80-capture batching test and a failed assertion then left the SQLite handle open during TemporaryDirectory cleanup.
+- Fixes repeated "CDX text response was incomplete; retrying as JSON" messages and the duplicate numbered-page requests behind them.
+- Preserves v1.0.6.4 deterministic cross-platform download batching, v1.0.6.2 acquisition-only mode, v1.0.6.1 replay pacing, and v1.0.6 maximum-recall scanning.
 - Database schema remains version 8. No destructive project migration is introduced.
 
-Download-only resource behavior
-- Uses the existing capture manifest/resume database; no scanner pool, scan run, document, match, research index, media job, or scan report is created.
-- Candidate rows stream directly from indexed captures in bounded 2,000-row pages; no archive_scout_download_queue temp table is built for this operation.
-- Known-size captures retain small-first ordering through the existing composite capture index; unknown-size captures follow in ID order.
-- Replay bytes stream directly to .part files. SHA-256 is disabled only for download-only acquisition and content_hash remains empty until later scan/compaction work needs it.
-- Completion records are coalesced by count/time and persisted in bounded SQLite transactions; operation progress persistence remains relaxed for download-only runs.
-- Destination paths are staged in a bounded in-memory queue and persisted before replay begins. Freed executor slots consume this staged queue without a new SQLite transaction, so scheduling differences cannot recreate one-commit-per-slot behavior.
-- download_attempts increments with coalesced completion/error writes. A crash before that flush is safe because the durable local_path lets the next run adopt an already-finalized file without another Wayback download.
-- Compact Project backfills missing acquisition-only capture hashes and includes raw captures in exact-byte copy-on-write deduplication.
+Root cause and correction
+- Automatic paging uses Wayback's /web/timemap/json endpoint first while the compact bulk-row client previously preferred line-oriented text for lower memory use.
+- The path-specific Timemap JSON endpoint can ignore output=txt and return valid JSON. The text parser rejected that body, reported it as incomplete, and fetched the same page again as JSON.
+- Path-specific Timemap endpoints now use their native representation first: /web/timemap/json uses JSON and /web/timemap/cdx uses line-oriented text.
+- Successful bodies are representation-sniffed. Valid JSON returned for a text request and valid text returned for a JSON request are parsed locally without a second network request.
+- Bodies that actually look like malformed/truncated JSON still enter the existing alternate-representation and endpoint-recovery path. The fix does not accept partial JSON as complete.
 
-Scanner / rescan memory and I/O
-- Existing final capture sniffing reads only the required prefix instead of read_bytes() on the entire file.
-- Normal scan and local rescan compute SHA-256 from bytes already loaded for decoding instead of performing a second full disk read.
-- The raw bytes buffer is released before DOM parsing, normalization, and scoring.
-- Compact Project iterates legacy body rows instead of fetchall() materialization.
+Performance and recovery invariants
+- A normal successful Timemap JSON numbered page now requires one request rather than a text request followed by a duplicate JSON request.
+- CDX worker count, shared 0.75-second request-start spacing, pageSize=9, rolling bounded scheduler, and response-memory bounds are unchanged.
+- Per-page completion checkpoints, isolated failed-page requeue, resume-key fallback, date-window subdivision, endpoint rotation, coordinated rate-limit handling, and pause/save semantics remain unchanged.
+- Existing projects and unfinished queues remain compatible.
 
-Dashboard behavior
-- Exact dashboard COUNT queries are suspended while an operation is active.
-- Live pending/backlog counters are updated from ProgressEvent detail.
-- Exact counts refresh at operation boundaries and every five seconds only while the Dashboard is idle/visible; other idle pages use a longer interval.
-
-CI portability fix
-- The previous macOS Tests workflow failed only because TemporaryDirectory resolved to /private/var/... while the expected Path retained the equivalent /var/... alias. The regression now compares resolved paths.
-- The v1.0.6.3 Windows workflow exposed platform-dependent commit batching (33 commits versus the test ceiling of 20). The regression now forces a one-worker slot-by-slot schedule on every OS and still requires fewer than 10 commits, making the batching guarantee deterministic rather than timing-sensitive.
-- The batching test closes SQLite in a finally block before Windows removes its temporary directory, so a future assertion failure reports the real cause instead of being replaced by WinError 32.
-- Version metadata checks target 1.0.6.4.
+Regression coverage
+- Native Timemap JSON is used first even when compact bulk indexing prefers text.
+- A valid Timemap JSON page completes with exactly one transport request.
+- Valid JSON returned contrary to a text request is parsed without refetching.
+- Valid text returned contrary to a JSON request is parsed without refetching.
+- Malformed JSON still retries using line-oriented text and retains the prior recovery behavior.
 
 Local automated validation
-- Full suite: 225 tests run, 222 passed, 3 skipped in this container.
-- v1.0.6.4 resource regression coverage verifies no-hash download-only transport, batched completion commits, queue-free download-only candidate streaming, deferred-hash compaction, no second scan hash read, and no active dashboard SQL recount.
-- Python compileall and git diff --check pass.
-- Offline 100,000-row benchmark smoke run completes with no live network access.
+- Full suite: 228 tests run, 227 passed, 1 environment skip, 0 failed.
+- Focused CDX response-recovery suite: 7 tests passed.
+- Python compileall passes for archive_scout, tests, and scripts.
+- Offline 100,000-row benchmark completed with 100,000 inserts, zero duplicate work, zero HTTP attempts, and zero unchanged-row rewrites.
+- Release/package/workflow/Windows executable metadata target 1.0.6.5.
 - Native multi-platform GitHub Actions/build smoke tests must still run on the exact release commit before publishing platform binaries.

@@ -88,6 +88,89 @@ class CDXResponseRecoveryTests(unittest.TestCase):
         self.assertEqual(query["gzip"], ["false"])
         self.assertEqual(query["fl"], ["urlkey,timestamp,mimetype,statuscode,digest,length,original"])
 
+    def test_text_preference_does_not_make_timemap_json_fetch_twice(self) -> None:
+        body = (
+            b'[["urlkey","timestamp","original","mimetype","statuscode","digest","length"],'
+            b'["com,example)/","20010101000000","http://example.com/","text/html","200","ABC","12"]]'
+        )
+        transport = SequenceTransport([body])
+        client = HttpClient(
+            FixedRateLimiter(0),
+            retries=1,
+            timeout=1,
+            user_agent="test",
+            stop_event=threading.Event(),
+            transport=transport,
+        )
+        result = client.get_cdx_rows_any(
+            ("https://web.archive.org/web/timemap/json",),
+            [
+                ("url", "example.com/*"),
+                ("output", "json"),
+                ("fl", "urlkey,timestamp,original,mimetype,statuscode,digest,length"),
+                ("page", "0"),
+                ("pageSize", "9"),
+            ],
+            prefer_text=True,
+        )
+        self.assertEqual(len(result.rows), 1)
+        self.assertEqual(result.rows[0][1], "http://example.com/")
+        self.assertEqual(len(transport.urls), 1)
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(transport.urls[0]).query)
+        self.assertEqual(query["output"], ["json"])
+
+    def test_valid_json_returned_for_text_request_is_parsed_without_refetch(self) -> None:
+        body = (
+            b'[["urlkey","timestamp","original","mimetype","statuscode","digest","length"],'
+            b'["com,example)/a","20010101000000","http://example.com/a","text/html","200","ABC","12"]]'
+        )
+        transport = SequenceTransport([body])
+        client = HttpClient(
+            FixedRateLimiter(0),
+            retries=1,
+            timeout=1,
+            user_agent="test",
+            stop_event=threading.Event(),
+            transport=transport,
+        )
+        result = client.get_cdx_rows_any(
+            ("https://web.archive.org/cdx/search/cdx",),
+            [
+                ("url", "example.com/*"),
+                ("output", "json"),
+                ("fl", "urlkey,timestamp,original,mimetype,statuscode,digest,length"),
+            ],
+            prefer_text=True,
+        )
+        self.assertEqual(len(result.rows), 1)
+        self.assertEqual(len(transport.urls), 1)
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(transport.urls[0]).query)
+        self.assertEqual(query["output"], ["txt"])
+
+    def test_valid_text_returned_for_json_request_is_parsed_without_refetch(self) -> None:
+        body = b"com,example)/ 20010101000000 text/html 200 ABC 12 http://example.com/\n"
+        transport = SequenceTransport([body])
+        client = HttpClient(
+            FixedRateLimiter(0),
+            retries=1,
+            timeout=1,
+            user_agent="test",
+            stop_event=threading.Event(),
+            transport=transport,
+        )
+        result = client.get_cdx_rows_any(
+            ("https://web.archive.org/cdx/search/cdx",),
+            [
+                ("url", "example.com/*"),
+                ("output", "json"),
+                ("fl", "urlkey,timestamp,original,mimetype,statuscode,digest,length"),
+            ],
+            prefer_text=False,
+        )
+        self.assertEqual(len(result.rows), 1)
+        self.assertEqual(result.rows[0][1], "http://example.com/")
+        self.assertEqual(len(transport.urls), 1)
+
     def test_page_count_text_fallback_is_numeric(self) -> None:
         params = cdx_text_fallback_params([
             ("url", "example.com/*"),

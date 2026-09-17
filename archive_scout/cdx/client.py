@@ -493,6 +493,24 @@ class HttpClient:
         with self.endpoint_lock:
             self.endpoint_cooldown_until[endpoint] = time.monotonic() + 20.0
 
+    @staticmethod
+    def _cdx_format_attempts(endpoint: str, prefer_text: bool) -> tuple[str, str]:
+        """Try an endpoint's native representation before its fallback.
+
+        Wayback's path-specific Timemap endpoints can ignore ``output=txt`` or
+        ``output=json``.  In particular, ``/web/timemap/json`` commonly returns
+        JSON even when a caller asked for text.  Trying text first there made a
+        valid response look malformed and caused every numbered page to be
+        downloaded a second time.  The generic CDX endpoint still honors the
+        caller's low-memory text preference.
+        """
+        path = urllib.parse.urlsplit(endpoint).path.rstrip("/").casefold()
+        if path.endswith("/web/timemap/json"):
+            return ("json", "text")
+        if path.endswith("/web/timemap/cdx"):
+            return ("text", "json")
+        return ("text", "json") if prefer_text else ("json", "text")
+
     def get_cdx_any(
         self,
         urls: Iterable[str],
@@ -508,7 +526,7 @@ class HttpClient:
         text_params = cdx_text_fallback_params(params)
 
         for endpoint in endpoints:
-            attempts = ("text", "json") if prefer_text else ("json", "text")
+            attempts = self._cdx_format_attempts(endpoint, prefer_text)
             first_error: BaseException | None = None
             for format_name in attempts:
                 request_params = text_params if format_name == "text" else params
@@ -516,10 +534,9 @@ class HttpClient:
                 try:
                     accept = "text/plain,*/*" if format_name == "text" else "application/json,text/plain,*/*"
                     response = self.get(full_url, max_bytes, accept)
-                    if format_name == "text":
-                        payload = parse_cdx_text_response(response["data"], endpoint, request_params)
-                    else:
-                        payload = parse_json_response(response["data"], endpoint)
+                    payload = parse_cdx_response_data(
+                        response["data"], endpoint, request_params, format_name
+                    )
                     self._remember_endpoint_success(endpoint)
                     return payload
                 except MemoryError as exc:
@@ -532,7 +549,11 @@ class HttpClient:
                     first_error = first_error or exc
                     if self.retry_callback:
                         other = "JSON" if format_name == "text" else "line-oriented text"
-                        self.retry_callback(1, 1, f"CDX {format_name} response was incomplete; retrying as {other}", 0.0)
+                        self.retry_callback(
+                            1, 1,
+                            f"CDX {format_name} response was malformed or truncated; retrying as {other}",
+                            0.0,
+                        )
                     continue
                 except TransientRequestError as exc:
                     first_error = first_error or exc
@@ -622,7 +643,7 @@ class HttpClient:
         text_params = cdx_text_fallback_params(params)
 
         for endpoint in endpoints:
-            attempts = ("text", "json") if prefer_text else ("json", "text")
+            attempts = self._cdx_format_attempts(endpoint, prefer_text)
             first_error: BaseException | None = None
             for format_name in attempts:
                 request_params = text_params if format_name == "text" else params
@@ -630,10 +651,9 @@ class HttpClient:
                 try:
                     accept = "text/plain,*/*" if format_name == "text" else "application/json,text/plain,*/*"
                     response = self.get(full_url, max_bytes, accept)
-                    if format_name == "text":
-                        result = parse_cdx_text_rows(response["data"], endpoint, request_params)
-                    else:
-                        result = parse_cdx_rows_payload(parse_json_response(response["data"], endpoint))
+                    result = parse_cdx_rows_response_data(
+                        response["data"], endpoint, request_params, format_name
+                    )
                     self._remember_endpoint_success(endpoint)
                     return result
                 except MemoryError as exc:
@@ -646,7 +666,11 @@ class HttpClient:
                     first_error = first_error or exc
                     if self.retry_callback:
                         other = "JSON" if format_name == "text" else "line-oriented text"
-                        self.retry_callback(1, 1, f"CDX {format_name} response was incomplete; retrying as {other}", 0.0)
+                        self.retry_callback(
+                            1, 1,
+                            f"CDX {format_name} response was malformed or truncated; retrying as {other}",
+                            0.0,
+                        )
                     continue
                 except TransientRequestError as exc:
                     first_error = first_error or exc
@@ -731,6 +755,59 @@ def request_cdx_rows(
         urls, params, max_bytes=max_bytes, prefer_text=prefer_text
     )
     return parse_cdx_rows_payload(payload)
+
+
+def _looks_like_json_container(data: bytes | bytearray | memoryview) -> bool:
+    """Return whether a CDX body starts like a JSON table/error object."""
+    prefix = bytes(data[:64]).lstrip(b"\xef\xbb\xbf \t\r\n")
+    return prefix.startswith((b"[", b"{"))
+
+
+def parse_cdx_response_data(
+    data: bytes,
+    endpoint: str,
+    params: list[tuple[str, str]],
+    requested_format: str,
+) -> object:
+    """Parse the representation Wayback returned, not merely the one requested.
+
+    Path-specific Timemap services occasionally ignore the ``output`` query
+    parameter.  A valid response in the other representation can therefore be
+    consumed locally instead of issuing the same expensive CDX request again.
+    Bodies which actually look like truncated JSON still raise and use the
+    normal representation/endpoint recovery path.
+    """
+    looks_json = _looks_like_json_container(data)
+    if requested_format == "text":
+        if looks_json:
+            return parse_json_response(data, endpoint)
+        return parse_cdx_text_response(data, endpoint, params)
+    try:
+        return parse_json_response(data, endpoint)
+    except MalformedCDXResponse:
+        if looks_json:
+            raise
+        return parse_cdx_text_response(data, endpoint, cdx_text_fallback_params(params))
+
+
+def parse_cdx_rows_response_data(
+    data: bytes | bytearray,
+    endpoint: str,
+    params: list[tuple[str, str]],
+    requested_format: str,
+) -> CDXRows:
+    """Compact-row equivalent of :func:`parse_cdx_response_data`."""
+    looks_json = _looks_like_json_container(data)
+    if requested_format == "text":
+        if looks_json:
+            return parse_cdx_rows_payload(parse_json_response(bytes(data), endpoint))
+        return parse_cdx_text_rows(data, endpoint, params)
+    try:
+        return parse_cdx_rows_payload(parse_json_response(bytes(data), endpoint))
+    except MalformedCDXResponse:
+        if looks_json:
+            raise
+        return parse_cdx_text_rows(data, endpoint, cdx_text_fallback_params(params))
 
 def parse_json_response(data: bytes, endpoint: str = "") -> object:
     raw = data.decode("utf-8", "replace").lstrip("\ufeff").strip()
