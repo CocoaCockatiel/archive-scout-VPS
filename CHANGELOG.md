@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.6.4
+
+- Makes download-only SQLite batching deterministic across Windows, macOS, and Linux instead of depending on how each platform wakes completed worker futures.
+- Persists capture destination paths in a small bounded staging queue before replay, then submits downloads without a database transaction for every freed worker slot.
+- Moves `download_attempts` accounting into coalesced completion/error writes, preserving resume behavior while cutting hot-path commits substantially.
+- Keeps successful final files crash-adoptable because `local_path` is durable before replay begins; completion metadata can therefore be safely flushed in larger groups.
+- Hardens the v1.0.6.3 resource regression test so Windows always closes the SQLite connection before its temporary project directory is removed, even when the assertion fails.
+- Updates release metadata and the full GitHub Actions matrix to 1.0.6.4.
+
 ## 1.0.6.3
 
 - Reduced resource use without reducing replay pacing or scan recall.

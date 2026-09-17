@@ -117,34 +117,48 @@ class V1063ResourceEfficiencyTests(unittest.TestCase):
     def test_download_only_disables_content_hashing_and_batches_database_commits(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            config = self.make_config(root, workers=10)
+            # One worker deliberately forces slot-by-slot completion. The old
+            # v1.0.6.3 submission loop committed once for nearly every freed
+            # slot under this scheduling pattern (which Windows exposed in CI).
+            config = self.make_config(root, workers=1)
             database = open_database(root)
-            self.insert_captures(database, config, 80)
             commits = 0
+            try:
+                self.insert_captures(database, config, 80)
 
-            def trace(sql: str) -> None:
-                nonlocal commits
-                if sql.strip().upper() == "COMMIT":
-                    commits += 1
+                def trace(sql: str) -> None:
+                    nonlocal commits
+                    if sql.strip().upper() == "COMMIT":
+                        commits += 1
 
-            database.set_trace_callback(trace)
-            _LeanDownloadClient.calls = 0
-            _LeanDownloadClient.hash_flags = []
-            with mock.patch.object(download_mod, "HttpClient", _LeanDownloadClient):
-                stats = download_archive_only(config, database, threading.Event(), None)
-            database.set_trace_callback(None)
+                database.set_trace_callback(trace)
+                _LeanDownloadClient.calls = 0
+                _LeanDownloadClient.hash_flags = []
+                with mock.patch.object(download_mod, "HttpClient", _LeanDownloadClient):
+                    stats = download_archive_only(config, database, threading.Event(), None)
+                database.set_trace_callback(None)
+                empty_hashes = database.execute(
+                    "SELECT COUNT(*) FROM captures WHERE COALESCE(content_hash,'')=''"
+                ).fetchone()[0]
+                attempts = database.execute(
+                    "SELECT MIN(download_attempts),MAX(download_attempts) FROM captures"
+                ).fetchone()
+            finally:
+                # Windows keeps an open SQLite handle locked. Always close the
+                # database before TemporaryDirectory tries to remove the project,
+                # even when an assertion or mocked download unexpectedly fails.
+                database.set_trace_callback(None)
+                database.close()
             self.assertEqual(stats["downloaded"], 80)
             self.assertEqual(_LeanDownloadClient.calls, 80)
             self.assertTrue(_LeanDownloadClient.hash_flags)
             self.assertFalse(any(_LeanDownloadClient.hash_flags))
-            # Submission state is checkpointed in bounded groups and completion
-            # results are coalesced. This must remain far below one commit/item.
-            self.assertLess(commits, 20)
-            self.assertEqual(
-                database.execute("SELECT COUNT(*) FROM captures WHERE COALESCE(content_hash,'')='' ").fetchone()[0],
-                80,
-            )
-            database.close()
+            # Destination paths are staged in bounded groups and completion
+            # results are coalesced. The commit count must not depend on how
+            # quickly Windows or macOS wakes individual completed futures.
+            self.assertLess(commits, 10)
+            self.assertEqual(empty_hashes, 80)
+            self.assertEqual(tuple(attempts), (1, 1))
 
 
     def test_compaction_backfills_deferred_download_only_hashes(self):
@@ -172,6 +186,38 @@ class V1063ResourceEfficiencyTests(unittest.TestCase):
             self.assertEqual(len(set(hashes)), 1)
             self.assertTrue(hashes[0])
             database.close()
+
+    def test_download_only_adopts_durable_final_file_without_network(self):
+        """A crash after atomic rename must not force another Wayback GET."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.make_config(root, workers=1)
+            database = open_database(root)
+            try:
+                self.insert_captures(database, config, 1)
+                row = database.execute("SELECT id FROM captures").fetchone()
+                capture_id = int(row[0])
+                final_path = root / "captures" / "2001" / "01" / "already-final.html"
+                final_path.parent.mkdir(parents=True, exist_ok=True)
+                final_path.write_bytes(b"<html><body>already durable</body></html>")
+                database.execute(
+                    "UPDATE captures SET local_path=? WHERE id=?",
+                    (str(final_path), capture_id),
+                )
+                database.commit()
+                _LeanDownloadClient.calls = 0
+                _LeanDownloadClient.hash_flags = []
+                with mock.patch.object(download_mod, "HttpClient", _LeanDownloadClient):
+                    stats = download_archive_only(config, database, threading.Event(), None)
+                state, local_path = database.execute(
+                    "SELECT state,local_path FROM captures WHERE id=?", (capture_id,)
+                ).fetchone()
+            finally:
+                database.close()
+            self.assertEqual(stats["downloaded"], 1)
+            self.assertEqual(_LeanDownloadClient.calls, 0)
+            self.assertEqual(state, "downloaded_unscanned")
+            self.assertEqual(Path(local_path), final_path)
 
     def test_no_hash_streaming_writes_same_bytes_without_digest_work(self):
         with tempfile.TemporaryDirectory() as temp:

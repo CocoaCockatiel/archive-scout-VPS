@@ -1,9 +1,10 @@
-Archive Scout 1.0.6.3 source validation
+Archive Scout 1.0.6.4 source validation
 Date: 2026-09-16
 
 Release scope
 - Preserves v1.0.6.2 Index and download only (no scanning), v1.0.6.1 acquisition-first replay pacing, and v1.0.6 maximum-recall scanning.
 - Reduces resource usage by removing redundant full-file reads, optional hot-path hashing, project-sized download-only queue materialization, per-completion SQLite commit pressure, and live dashboard recounts during active operations.
+- Fixes the Windows-only v1.0.6.3 regression where executor wake-up timing caused 33 download-only commits in the 80-capture batching test and a failed assertion then left the SQLite handle open during TemporaryDirectory cleanup.
 - Database schema remains version 8. No destructive project migration is introduced.
 
 Download-only resource behavior
@@ -12,6 +13,8 @@ Download-only resource behavior
 - Known-size captures retain small-first ordering through the existing composite capture index; unknown-size captures follow in ID order.
 - Replay bytes stream directly to .part files. SHA-256 is disabled only for download-only acquisition and content_hash remains empty until later scan/compaction work needs it.
 - Completion records are coalesced by count/time and persisted in bounded SQLite transactions; operation progress persistence remains relaxed for download-only runs.
+- Destination paths are staged in a bounded in-memory queue and persisted before replay begins. Freed executor slots consume this staged queue without a new SQLite transaction, so scheduling differences cannot recreate one-commit-per-slot behavior.
+- download_attempts increments with coalesced completion/error writes. A crash before that flush is safe because the durable local_path lets the next run adopt an already-finalized file without another Wayback download.
 - Compact Project backfills missing acquisition-only capture hashes and includes raw captures in exact-byte copy-on-write deduplication.
 
 Scanner / rescan memory and I/O
@@ -27,11 +30,13 @@ Dashboard behavior
 
 CI portability fix
 - The previous macOS Tests workflow failed only because TemporaryDirectory resolved to /private/var/... while the expected Path retained the equivalent /var/... alias. The regression now compares resolved paths.
-- Version metadata checks target 1.0.6.3.
+- The v1.0.6.3 Windows workflow exposed platform-dependent commit batching (33 commits versus the test ceiling of 20). The regression now forces a one-worker slot-by-slot schedule on every OS and still requires fewer than 10 commits, making the batching guarantee deterministic rather than timing-sensitive.
+- The batching test closes SQLite in a finally block before Windows removes its temporary directory, so a future assertion failure reports the real cause instead of being replaced by WinError 32.
+- Version metadata checks target 1.0.6.4.
 
 Local automated validation
-- Full suite: 223 tests run, 220 passed, 3 skipped in this container.
-- v1.0.6.3 resource regression coverage verifies no-hash download-only transport, batched completion commits, queue-free download-only candidate streaming, deferred-hash compaction, no second scan hash read, and no active dashboard SQL recount.
+- Full suite: 225 tests run, 222 passed, 3 skipped in this container.
+- v1.0.6.4 resource regression coverage verifies no-hash download-only transport, batched completion commits, queue-free download-only candidate streaming, deferred-hash compaction, no second scan hash read, and no active dashboard SQL recount.
 - Python compileall and git diff --check pass.
 - Offline 100,000-row benchmark smoke run completes with no live network access.
 - Native multi-platform GitHub Actions/build smoke tests must still run on the exact release commit before publishing platform binaries.

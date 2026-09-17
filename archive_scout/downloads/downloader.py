@@ -830,13 +830,20 @@ def download_archive_only(
     # local CPU stage exists to consume executor time or memory. The fixed rate
     # limiter still controls Wayback request starts.
     inflight_limit = max(config.workers, config.workers * 3)
+    # Persist destination paths in bounded staging groups, then feed the
+    # executor from memory without another SQLite transaction for every newly
+    # opened slot. Keeping local_path durable before replay starts means an
+    # abrupt exit after the atomic .part -> final rename can adopt the exact
+    # file on the next run instead of downloading it again.
+    stage_limit = max(64, min(512, config.workers * 16))
+    ready_downloads: deque[tuple[dict[str, object], Path]] = deque()
     futures: dict[concurrent.futures.Future, dict[str, object]] = {}
     rows_exhausted = False
     submitted = downloaded = skipped = failures = 0
     started = time.monotonic()
     last_emit = 0.0
     last_flush = started
-    flush_count = max(16, min(128, config.workers * 4))
+    flush_count = max(32, min(128, config.workers * 8))
     success_buffer: list[tuple[str, str, int, str, int, int, int]] = []
     skipped_buffer: list[int] = []
     error_buffer: list[tuple[int, dict[str, object], BaseException]] = []
@@ -847,7 +854,11 @@ def download_archive_only(
         if not pending_count:
             return
         now_mono = time.monotonic()
-        if not force and pending_count < flush_count and now_mono - last_flush < 0.25:
+        # Completion state can safely be coalesced for up to one second. Final
+        # capture files are already atomically durable and their local_path was
+        # staged before replay, so a crash inside this interval simply causes
+        # the next run to adopt the existing file without another network GET.
+        if not force and pending_count < flush_count and now_mono - last_flush < 1.0:
             return
         now = utc_now()
         with database:
@@ -855,7 +866,8 @@ def download_archive_only(
                 database.executemany(
                     """UPDATE captures SET state='downloaded_unscanned',local_path=?,
                        content_hash=?,http_status=?,final_url=?,bytes_saved=?,
-                       skip_reason=NULL,classifier_revision=?,updated_at=? WHERE id=?""",
+                       skip_reason=NULL,classifier_revision=?,
+                       download_attempts=download_attempts+1,updated_at=? WHERE id=?""",
                     (
                         (path, content_hash, http_status, final_url, bytes_saved,
                          classifier_revision, now, capture_id)
@@ -876,13 +888,15 @@ def download_archive_only(
             if skipped_buffer:
                 database.executemany(
                     """UPDATE captures SET state='skipped',skip_reason='sniffed_non_text',
-                       classifier_revision=?,updated_at=? WHERE id=?""",
+                       classifier_revision=?,download_attempts=download_attempts+1,
+                       updated_at=? WHERE id=?""",
                     ((CLASSIFIER_REVISION, now, capture_id) for capture_id in skipped_buffer),
                 )
             for capture_id, item, exc in error_buffer:
                 category, status, retryable = classify_exception(exc)
                 database.execute(
-                    "UPDATE captures SET state='error',http_status=?,updated_at=? WHERE id=?",
+                    """UPDATE captures SET state='error',http_status=?,
+                       download_attempts=download_attempts+1,updated_at=? WHERE id=?""",
                     (status, now, capture_id),
                 )
                 record_error(
@@ -902,6 +916,49 @@ def download_archive_only(
         skipped_buffer.clear()
         error_buffer.clear()
         last_flush = now_mono
+
+    def stage_candidates() -> None:
+        """Fill a small durable path queue without project-sized temp tables.
+
+        Path staging is intentionally decoupled from replay submission. On
+        Windows, executor completions can arrive one at a time; the old loop
+        committed a new 'downloading' row for each freed slot and therefore
+        turned platform scheduling differences into dozens of SQLite commits.
+        Staging up to a few hundred paths once keeps memory bounded while making
+        database pressure independent of thread wake-up timing.
+        """
+        nonlocal rows_exhausted
+        if rows_exhausted or len(ready_downloads) >= stage_limit:
+            return
+        staged: list[tuple[dict[str, object], Path]] = []
+        reserved_paths: set[str] = set()
+        while len(ready_downloads) + len(staged) < stage_limit:
+            try:
+                row = next(row_iter)
+            except StopIteration:
+                rows_exhausted = True
+                break
+            item = dict(row)
+            path = _allocate_capture_path(database, config.output_dir, row)
+            if str(path) in reserved_paths:
+                path = url_capture_path(
+                    config.output_dir,
+                    str(row["timestamp"]),
+                    str(row["original_url"]),
+                    disambiguate=True,
+                )
+            reserved_paths.add(str(path))
+            item["assigned_path"] = str(path)
+            staged.append((item, path))
+        if not staged:
+            return
+        now = utc_now()
+        with database:
+            database.executemany(
+                "UPDATE captures SET local_path=?,updated_at=? WHERE id=?",
+                ((str(path), now, int(item["id"])) for item, path in staged),
+            )
+        ready_downloads.extend(staged)
 
     def emit_progress(force: bool = False) -> None:
         nonlocal last_emit
@@ -943,42 +1000,21 @@ def download_archive_only(
                 if stop_event.is_set():
                     raise Stopped
 
+                if len(ready_downloads) < max(config.workers, inflight_limit):
+                    stage_candidates()
+
                 slots = inflight_limit - len(futures)
-                if not rows_exhausted and slots > 0:
-                    batch: list[tuple[dict[str, object], Path]] = []
-                    reserved_paths: set[str] = set()
-                    while len(batch) < slots:
-                        try:
-                            row = next(row_iter)
-                        except StopIteration:
-                            rows_exhausted = True
-                            break
-                        item = dict(row)
-                        path = _allocate_capture_path(database, config.output_dir, row)
-                        if str(path) in reserved_paths:
-                            path = url_capture_path(
-                                config.output_dir, str(row["timestamp"]), str(row["original_url"]),
-                                disambiguate=True,
-                            )
-                        reserved_paths.add(str(path))
-                        batch.append((item, path))
-                    if batch:
-                        now = utc_now()
-                        with database:
-                            database.executemany(
-                                """UPDATE captures SET state='downloading',local_path=?,
-                                   download_attempts=download_attempts+1,updated_at=? WHERE id=?""",
-                                ((str(path), now, int(item["id"])) for item, path in batch),
-                            )
-                        for item, path in batch:
-                            futures[pool.submit(
-                                _download_capture, item, path, config, client,
-                                verify_existing_hash=False, compute_hash=False,
-                            )] = item
-                            submitted += 1
+                while slots > 0 and ready_downloads:
+                    item, path = ready_downloads.popleft()
+                    futures[pool.submit(
+                        _download_capture, item, path, config, client,
+                        verify_existing_hash=False, compute_hash=False,
+                    )] = item
+                    submitted += 1
+                    slots -= 1
 
                 if not futures:
-                    if rows_exhausted:
+                    if rows_exhausted and not ready_downloads:
                         flush_results(force=True)
                         break
                     flush_results()
@@ -1012,17 +1048,13 @@ def download_archive_only(
                     except RateLimitDeferred:
                         with database:
                             database.execute(
-                                "UPDATE captures SET state='pending',updated_at=? WHERE id=?",
+                                """UPDATE captures SET state='pending',
+                                   download_attempts=download_attempts+1,updated_at=? WHERE id=?""",
                                 (utc_now(), capture_id),
                             )
                         raise
                     except Stopped:
                         flush_results(force=True)
-                        with database:
-                            database.execute(
-                                "UPDATE captures SET state='pending',updated_at=? WHERE id=?",
-                                (utc_now(), capture_id),
-                            )
                         raise
                     except Exception as exc:
                         error_buffer.append((capture_id, item, exc))
@@ -1047,8 +1079,6 @@ def download_archive_only(
         for future in futures:
             future.cancel()
         flush_results(force=True)
-        with database:
-            database.execute("UPDATE captures SET state='pending' WHERE state='downloading'")
         raise
     finally:
         client.close()

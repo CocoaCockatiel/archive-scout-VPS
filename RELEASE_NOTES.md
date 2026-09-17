@@ -1,6 +1,13 @@
-# Archive Scout 1.0.6.3
+# Archive Scout 1.0.6.4
 
-Archive Scout 1.0.6.3 reduces CPU, memory, and SQLite/filesystem pressure without lowering Wayback request pacing or search thoroughness. The v1.0.6.2 **Index and download only (no scanning)** operation remains the leanest acquisition path, while the normal download+scan and local rescan paths retain their existing recall semantics.
+Archive Scout 1.0.6.4 is a cross-platform batching hotfix for the resource-efficiency release. It preserves the v1.0.6.3 CPU, memory, SQLite, and filesystem reductions while making download-only commit behavior deterministic on Windows as well as macOS and Linux. The **Index and download only (no scanning)** operation remains the leanest acquisition path and retains the same Wayback pacing, resume behavior, and Hitlist compatibility.
+
+## Windows batching hotfix
+
+- Download-only now stages a bounded group of durable `local_path` assignments and feeds workers from that local queue instead of committing `state=downloading` for every freed executor slot.
+- Completion metadata is coalesced for up to one second or a bounded result count. Final files are already atomically complete and their paths are durable, so a crash in that interval is recovered by adopting the existing file rather than redownloading it.
+- `download_attempts` is incremented with the batched completion/error write rather than the submission write.
+- The Windows regression test closes SQLite before temporary-directory cleanup, preventing a failed assertion from being obscured by `WinError 32`.
 
 ## Resource-efficient acquisition
 
@@ -21,7 +28,7 @@ Archive Scout 1.0.6.3 reduces CPU, memory, and SQLite/filesystem pressure withou
 ## CI portability
 
 - The download-only path regression now compares resolved paths, fixing the macOS `/private/var/...` versus `/var/...` temporary-directory alias failure seen in the previous Tests workflow.
-- Package metadata and workflow checks target 1.0.6.3 across the supported Python/platform matrix.
+- Package metadata and workflow checks target 1.0.6.4 across the supported Python/platform matrix.
 
 The established defaults remain unchanged: 10 download workers, 0.125-second replay spacing (up to eight starts/second), 0.75-second CDX spacing, 10 parallel CDX requests, automatic network backend/endpoint/index strategy, and coordinated 429/503 backoff.
 
