@@ -18,7 +18,7 @@ from .jobs import ScanJob
 from .scoring import analyze_content, prepare_analysis_fields
 
 
-def _analyze_saved_document(row: dict[str, object], jobs: list[ScanJob]) -> dict[str, object]:
+def _analyze_saved_document(row: dict[str, object], jobs: list[ScanJob], report_config=None) -> dict[str, object]:
     path = Path(str(row["path"]))
     if not path.exists():
         return {"kind": "missing", "row": row, "path": path}
@@ -49,6 +49,9 @@ def _analyze_saved_document(row: dict[str, object], jobs: list[ScanJob]) -> dict
                 analyze_content(
                     str(row["original_url"]), title, visible, raw, links, job.patterns, job.prefilter,
                     prepared_fields, prepared_normalized_fields,
+                    include_hit_fields=(report_config is None or report_config.store_keyword_fields),
+                    include_snippets=(report_config is None or report_config.store_snippets),
+                    include_interesting_links=(report_config is None or report_config.store_interesting_links),
                 ),
             )
             for job in jobs
@@ -104,6 +107,7 @@ def rescan_keyword_sets(
     callback: Callable[[ProgressEvent], None] | None = None,
     document_ids: list[int] | None = None,
     workers: int | None = None,
+    report_config=None,
 ) -> None:
     if not jobs or any(not job.patterns for job in jobs):
         raise ValueError("at least one keyword rule is required in every selected keyword set")
@@ -151,7 +155,7 @@ def rescan_keyword_sets(
                     row = next(rows)
                 except StopIteration:
                     return
-                futures[pool.submit(_analyze_saved_document, row, jobs)] = row
+                futures[pool.submit(_analyze_saved_document, row, jobs, report_config)] = row
 
         submit_available()
         while futures:
@@ -216,7 +220,7 @@ def rescan_keyword_sets(
                         else:
                             saved_document_id = document_id
                         for scan_run_id, analysis in result["analyses"]:
-                            save_match(database, int(scan_run_id), saved_document_id, analysis)
+                            save_match(database, int(scan_run_id), saved_document_id, analysis, report_config)
                         resolve_errors(
                             database,
                             capture_id=capture_id,
@@ -248,6 +252,7 @@ def rescan_documents(
     callback: Callable[[ProgressEvent], None] | None = None,
     document_ids: list[int] | None = None,
     workers: int | None = None,
+    report_config=None,
 ) -> None:
     rescan_keyword_sets(
         database,
@@ -256,4 +261,5 @@ def rescan_documents(
         callback,
         document_ids,
         workers,
+        report_config,
     )

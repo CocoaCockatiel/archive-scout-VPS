@@ -19,7 +19,20 @@ from ..ai.relevance import AIReviewError, run_ai_review
 from ..ai.reports import generate_ai_reports
 from ..cdx.client import RateLimitDeferred
 from ..cdx.parameters import build_cdx_params, cdx_year_window
-from ..config import AIConfig, AnalysisConfig, KeywordSetConfig, MediaConfig, NetworkConfig, ProjectConfig, ResearchConfig, load_project_config, save_project_config
+from ..config import (
+    AIConfig,
+    AnalysisConfig,
+    KeywordSetConfig,
+    MediaConfig,
+    NetworkConfig,
+    ProjectConfig,
+    ReportConfig,
+    ResearchConfig,
+    REPORT_FIELD_NAMES,
+    REPORT_OUTPUT_NAMES,
+    load_project_config,
+    save_project_config,
+)
 from ..constants import APP_NAME, CDX_URL, DEFAULT_IMAGE_EXTENSIONS, DEFAULT_VIDEO_EXTENSIONS, OPERATION_MODES, REVIEW_STATUSES, SCOPE_LABELS, VERSION
 from ..database.connection import open_database
 from ..database.repositories import (
@@ -60,7 +73,7 @@ from .widgets import ToolTip
 MODE_LABELS = OPERATION_MODES
 MODE_HELP = {
     "all": "Queries CDX, downloads pending text captures, scans every selected keyword set, and writes reports.",
-    "download_only": "Indexes the target and downloads every text capture without creating scan jobs, documents, matches, research indexes, media jobs, or scan reports. Run Search with Hitlist afterward.",
+    "download_only": "Indexes the target and downloads every text capture without creating scan jobs, documents, matches, research indexes, or scan reports. If Media is enabled, the same optional media pipeline runs afterward. Run Search with Hitlist whenever you want to search the saved text.",
     "external_media_after_scan": "Indexes the site, downloads and scans all selected text pages, then indexes only external media URLs found in those saved pages and downloads them after discovery finishes.",
     "index": "Queries CDX and stores capture metadata without downloading pages.",
     "download": "Downloads pending text captures and scans them with every selected keyword set.",
@@ -192,6 +205,11 @@ class ArchiveScoutApp(tk.Tk):
         self.scan_workers_var = tk.StringVar(value="0")
         self.max_file_var = tk.StringVar(value="25")
         self.minimum_score_var = tk.StringVar(value="1")
+        self.report_output_vars = {name: tk.BooleanVar(value=True) for name in REPORT_OUTPUT_NAMES}
+        self.report_field_vars = {
+            name: {field: tk.BooleanVar(value=True) for field in REPORT_FIELD_NAMES[name]}
+            for name in REPORT_OUTPUT_NAMES
+        }
         self.cdx_delay_var = tk.StringVar(value="0.75")
         self.download_delay_var = tk.StringVar(value="0.125")
         self.rate_limit_base_var = tk.StringVar(value="30")
@@ -325,6 +343,7 @@ class ArchiveScoutApp(tk.Tk):
         self.create_keywords_tab()
         self.create_cdx_tab()
         self.create_media_tab()
+        self.create_reports_tab()
         self.create_analysis_tab()
         self.create_settings_tab()
         self.create_results_tab()
@@ -680,7 +699,7 @@ class ArchiveScoutApp(tk.Tk):
         self.notebook.add(tab, text="Media")
         options = ttk.Frame(tab)
         options.grid(row=0, column=0, columnspan=2, sticky="ew")
-        ttk.Checkbutton(options, text="Also download media during a full text run", variable=self.media_enabled_var).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(options, text="Also download media during text and download-only runs", variable=self.media_enabled_var).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(options, text="Images", variable=self.media_images_var).grid(row=0, column=1, padx=(16, 0))
         ttk.Checkbutton(options, text="Videos", variable=self.media_videos_var).grid(row=0, column=2, padx=(8, 0))
         ttk.Checkbutton(options, text="Discover media linked inside saved pages", variable=self.media_embedded_var).grid(row=0, column=3, padx=(16, 0))
@@ -721,7 +740,99 @@ class ArchiveScoutApp(tk.Tk):
         ttk.Label(settings, text="Maximum media size (MB):").grid(row=0, column=2)
         ttk.Entry(settings, textvariable=self.media_max_var, width=10).grid(row=0, column=3, padx=(5, 15))
         ttk.Label(settings, text="Media layout: media/images and media/videos (flat)").grid(row=0, column=4, sticky="w")
+        ttk.Label(
+            tab,
+            text="For media added after a text or download-only run, Snapshot=earliest uses collapse=urlkey by default (one archived timestamp per media URL). The primary text CDX query is never changed; latest/all explicitly override that media-only collapse.",
+            wraplength=1080,
+            style="Muted.TLabel",
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
+
+    def create_reports_tab(self) -> None:
+        tab = ttk.Frame(self.notebook, padding=10)
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(2, weight=1)
+        self.notebook.add(tab, text="Reports")
+        ttk.Label(tab, text="Report contents", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            tab,
+            text=(
+                "Choose every report file Archive Scout writes and every field that appears inside it. "
+                "When report-only derived data such as snippets, keyword-hit detail, Interesting Links, or "
+                "default review rows is not needed by any enabled output, Archive Scout does not store that "
+                "payload in SQLite. Core URL/timestamp/queue/error state is always retained for resume, retry, "
+                "Hitlist, and project integrity."
+            ),
+            wraplength=1080,
+            style="Muted.TLabel",
+        ).grid(row=1, column=0, sticky="ew", pady=(4, 10))
+
+        book = ttk.Notebook(tab)
+        book.grid(row=2, column=0, sticky="nsew")
+        groups = (
+            ("Text and index", ("matches_ranked", "matched_urls", "wayback_urls", "interesting_links", "keyword_counts", "all_indexed_urls", "summary")),
+            ("Errors", ("errors", "site_issues")),
+            ("Media", ("media_indexed", "media_downloaded", "media_wayback_urls", "media_errors", "media_summary")),
+            ("Archive analysis", ("analysis_summary", "forum_threads", "extractions", "legacy_assets", "duplicate_groups", "provenance", "snapshot_diffs", "first_appearances")),
+        )
+        output_labels = {
+            "matches_ranked": "Ranked matches (matches_ranked.txt)",
+            "matched_urls": "Matched URLs (matched_urls.txt)",
+            "wayback_urls": "Wayback URLs (wayback_urls.txt)",
+            "interesting_links": "Interesting Links (interesting_links.txt)",
+            "keyword_counts": "Keyword counts (keyword_counts.txt)",
+            "all_indexed_urls": "All indexed URLs (all_indexed_urls.txt)",
+            "errors": "Errors (errors.txt)",
+            "site_issues": "Site issues (site_issues.txt)",
+            "summary": "Text/index summary (summary.txt)",
+            "media_indexed": "Indexed media (media_indexed.txt)",
+            "media_downloaded": "Downloaded media (media_downloaded.txt)",
+            "media_wayback_urls": "Media Wayback URLs (media_wayback_urls.txt)",
+            "media_errors": "Media errors (media_errors.txt)",
+            "media_summary": "Media summary (media_summary.txt)",
+            "analysis_summary": "Analysis summary (analysis_summary.txt)",
+            "forum_threads": "Forum threads (forum_threads.tsv)",
+            "extractions": "Extractions (extractions.tsv)",
+            "legacy_assets": "Legacy assets (legacy_assets.tsv)",
+            "duplicate_groups": "Duplicate groups (duplicate_groups.tsv)",
+            "provenance": "Provenance (provenance.tsv)",
+            "snapshot_diffs": "Snapshot diffs (snapshot_diffs.tsv)",
+            "first_appearances": "First appearances (first_appearances.tsv)",
+        }
+
+        for group_label, names in groups:
+            page = ttk.Frame(book, padding=8)
+            page.columnconfigure(0, weight=1)
+            page.columnconfigure(1, weight=1)
+            book.add(page, text=group_label)
+            for index, name in enumerate(names):
+                row, column = divmod(index, 2)
+                box = ttk.LabelFrame(page, text=output_labels[name], padding=7)
+                box.grid(row=row, column=column, sticky="nsew", padx=(0, 6) if column == 0 else (6, 0), pady=5)
+                box.columnconfigure((0, 1, 2, 3), weight=1)
+                ttk.Checkbutton(box, text="Generate this file", variable=self.report_output_vars[name]).grid(
+                    row=0, column=0, columnspan=2, sticky="w"
+                )
+                ttk.Button(
+                    box, text="All fields", width=10,
+                    command=lambda value=name: self.set_report_fields(value, True),
+                ).grid(row=0, column=2, sticky="e", padx=2)
+                ttk.Button(
+                    box, text="No fields", width=10,
+                    command=lambda value=name: self.set_report_fields(value, False),
+                ).grid(row=0, column=3, sticky="e", padx=2)
+                for field_index, field_name in enumerate(REPORT_FIELD_NAMES[name]):
+                    field_row = 1 + field_index // 4
+                    field_column = field_index % 4
+                    ttk.Checkbutton(
+                        box,
+                        text=field_name.replace("_", " ").title(),
+                        variable=self.report_field_vars[name][field_name],
+                    ).grid(row=field_row, column=field_column, sticky="w", padx=(0, 8), pady=2)
+
+    def set_report_fields(self, output_name: str, enabled: bool) -> None:
+        for variable in self.report_field_vars.get(output_name, {}).values():
+            variable.set(bool(enabled))
 
     def create_analysis_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=10)
@@ -1361,6 +1472,13 @@ class ArchiveScoutApp(tk.Tk):
                 scan_workers=int(self.scan_workers_var.get()),
                 download_scope=SCOPE_LABELS[self.scope_var.get()],
                 minimum_score=int(self.minimum_score_var.get()),
+                report=ReportConfig(
+                    outputs=[name for name, variable in self.report_output_vars.items() if variable.get()],
+                    fields={
+                        name: [field for field, variable in variables.items() if variable.get()]
+                        for name, variables in self.report_field_vars.items()
+                    },
+                ),
                 max_file_mb=float(self.max_file_var.get()),
                 cdx_delay=float(self.cdx_delay_var.get()),
                 download_delay=float(self.download_delay_var.get()),
@@ -1433,7 +1551,6 @@ class ArchiveScoutApp(tk.Tk):
                 return
             self.worker_thread = None
         try:
-            ensure_frozen_bundle_available()
             config = override_config or self.build_config()
         except (ValueError, FrozenBundleError) as exc:
             messagebox.showerror(APP_NAME, str(exc))
@@ -1442,6 +1559,8 @@ class ArchiveScoutApp(tk.Tk):
         self.stop_event.clear()
         self.progress_var.set(0)
         self.status_var.set("Starting…")
+        self.progress.configure(mode="indeterminate")
+        self.progress.start(12)
         self.start_button.configure(state="disabled")
         if hasattr(self, "ai_start_button"):
             self.ai_start_button.configure(state="disabled")
@@ -1449,13 +1568,18 @@ class ArchiveScoutApp(tk.Tk):
             if hasattr(self, name):
                 getattr(self, name).configure(state="disabled")
         self.stop_button.configure(state="normal")
-        self.refresh_dashboard()
         self.log(f"Starting {mode} in {config.output_dir}")
         self.worker_thread = threading.Thread(target=self.run_worker, args=(config, mode), daemon=True)
         self.worker_thread.start()
 
     def run_worker(self, config: ProjectConfig, mode: str) -> None:
         try:
+            self.on_engine_event(ProgressEvent("starting", "Opening project and preparing operation…"))
+            # Bundle validation, migrations, backups, database setup, and every
+            # other potentially slow initialization step belong on the worker
+            # thread. The Start button must never leave Tk blocked at Starting…
+            # before a worker exists to report progress or failure.
+            ensure_frozen_bundle_available()
             self.events.put(("complete", run_project(config, mode, self.stop_event, self.on_engine_event)))
         except (RateLimitDeferred, ConnectivityPaused) as exc:
             self.events.put(("deferred", str(exc)))
@@ -2334,6 +2458,13 @@ class ArchiveScoutApp(tk.Tk):
         self.scan_workers_var.set(str(config.scan_workers))
         self.max_file_var.set(str(config.max_file_mb))
         self.minimum_score_var.set(str(config.minimum_score))
+        report = config.report.normalized()
+        for name, variable in self.report_output_vars.items():
+            variable.set(report.output_enabled(name))
+        for name, variables in self.report_field_vars.items():
+            selected = set(report.fields_for(name))
+            for field, variable in variables.items():
+                variable.set(field in selected)
         self.cdx_delay_var.set(str(config.cdx_delay))
         self.download_delay_var.set(str(config.download_delay))
         self.rate_limit_base_var.set(str(config.rate_limit_base_pause))

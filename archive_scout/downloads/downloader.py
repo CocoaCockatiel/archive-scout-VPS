@@ -438,6 +438,9 @@ def _scan_saved_capture(
         job.scan_run_id: analyze_content(
             original, title, visible, raw, links, job.patterns, job.prefilter,
             prepared_fields, prepared_normalized_fields,
+            include_hit_fields=config.report.store_keyword_fields,
+            include_snippets=config.report.store_snippets,
+            include_interesting_links=config.report.store_interesting_links,
         )
         for job in jobs
     }
@@ -461,7 +464,7 @@ def fetch_parse_scan(row: sqlite3.Row, config: ProjectConfig, jobs: list[ScanJob
     return _scan_saved_capture(row_dict, path, config, jobs)
 
 
-def save_success(database: sqlite3.Connection, result: dict) -> None:
+def save_success(database: sqlite3.Connection, result: dict, report_config=None) -> None:
     document_id = upsert_document(
         database, result["capture_id"], result["path"], result["title"],
         result["visible"], result["links"], result["content_hash"],
@@ -472,7 +475,7 @@ def save_success(database: sqlite3.Connection, result: dict) -> None:
         (result.get("encoding") or "", utc_now(), result["capture_id"]),
     )
     for scan_run_id, analysis in result["analyses"].items():
-        save_match(database, int(scan_run_id), document_id, analysis)
+        save_match(database, int(scan_run_id), document_id, analysis, report_config)
     resolve_errors(database, capture_id=result["capture_id"], document_id=document_id)
 
 
@@ -745,7 +748,7 @@ def download_archive(
                                 mark_capture_skipped(database, capture_id, "sniffed_non_text", CLASSIFIER_REVISION)
                                 resolved_scan_items += 1
                                 continue
-                            save_success(database, outcome)
+                            save_success(database, outcome, config.report)
                             completed_scans += 1
                             resolved_scan_items += 1
                             matched += int(any(

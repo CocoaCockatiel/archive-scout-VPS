@@ -105,6 +105,24 @@ def generate_job_reports(config: ProjectConfig, database: sqlite3.Connection, jo
     return paths
 
 
+def _secondary_media_config(config: ProjectConfig) -> ProjectConfig:
+    """Return media CDX settings without mutating the primary text query.
+
+    Media acquired as a follow-up to a text/download-only run defaults to one
+    archived timestamp per URL. The default ``earliest`` policy therefore uses
+    ``collapse=urlkey`` regardless of the text query's collapse settings. If the
+    user explicitly selects ``latest`` or ``all``, the automatic URL-key collapse
+    is removed for the media query so that policy can actually take effect.
+    Dedicated media-only operations keep their normal CDX settings unchanged.
+    """
+    normalized = config.normalized()
+    if normalized.media.snapshot_strategy == "earliest":
+        collapses = ["urlkey"]
+    else:
+        collapses = [value for value in normalized.cdx_collapses if value != "urlkey"]
+    return replace(normalized, cdx_collapses=collapses).normalized()
+
+
 def run_project(
     config: ProjectConfig,
     mode: str = "all",
@@ -275,16 +293,28 @@ def run_project(
             database.commit()
             return {"merge_summary": merge_report}
         if mode == "download_only":
-            # Keep SQLite as a lightweight durable manifest/resume queue. Removing
-            # it would force Hitlist and crash recovery to rediscover URL/timestamp
-            # metadata from filenames and would cost more than the tiny batched
-            # capture-state writes saved here. No scan/document/match/research/media
-            # work is created in this mode.
+            # Keep SQLite as a lightweight durable manifest/resume queue. No
+            # scan/document/match/research work is created here. Optional media
+            # acquisition uses the same Media-page settings as a full text run,
+            # but never creates scan jobs merely to discover embedded media.
             acquisition_config = replace(config, download_scope="all_text")
             index_archive(acquisition_config, database, stop_event, callback)
             stats = download_archive_only(
                 acquisition_config, database, stop_event, callback, states=("pending",)
             )
+            paths: dict[str, Path] = {"project": config.output_dir / "project.json"}
+            if config.media.enabled:
+                media_config = _secondary_media_config(config)
+                emit(
+                    callback,
+                    ProgressEvent(
+                        "media_index",
+                        "Text acquisition is complete. Indexing optional media with a single archived timestamp per URL by default…",
+                    ),
+                )
+                index_media(media_config, database, stop_event, callback)
+                download_media(media_config, database, stop_event, callback)
+                paths.update(generate_media_reports(media_config, database))
             emit(
                 callback,
                 ProgressEvent(
@@ -298,7 +328,7 @@ def run_project(
             )
             finish_operation_run(database, operation_run_id, "complete", "Download-only acquisition complete")
             database.commit()
-            return {"project": config.output_dir / "project.json"}
+            return paths
         if mode == "index":
             index_archive(config, database, stop_event, callback)
             paths = generate_index_reports(config, database)
@@ -355,7 +385,7 @@ def run_project(
         elif mode in {"download", "resume"}:
             download_archive(config, database, primary_run_id, stop_event, callback, states=("pending",), scan_jobs=jobs)
         elif mode == "rescan":
-            rescan_keyword_sets(database, jobs, stop_event, callback, workers=(config.scan_workers or None))
+            rescan_keyword_sets(database, jobs, stop_event, callback, workers=(config.scan_workers or None), report_config=config.report)
         elif mode == "retry_errors":
             retry_error_urls(config, database, primary_run_id, stop_event, callback, jobs)
             media_error_count = database.execute(
@@ -375,6 +405,7 @@ def run_project(
         if mode == "retry_errors" and database.execute("SELECT COUNT(*) FROM media_captures").fetchone()[0]:
             paths.update(generate_media_reports(config, database))
         if mode == "external_media_after_scan":
+            media_config = _secondary_media_config(config)
             emit(
                 callback,
                 ProgressEvent(
@@ -382,7 +413,7 @@ def run_project(
                     "Text scanning is complete. Discovering external images/videos in saved pages and resolving their Wayback captures…",
                 ),
             )
-            media_signature = index_external_embedded_media(config, database, stop_event, callback)
+            media_signature = index_external_embedded_media(media_config, database, stop_event, callback)
             media_total = int(database.execute(
                 "SELECT COUNT(*) FROM media_captures WHERE query_signature=?", (media_signature,)
             ).fetchone()[0])
@@ -399,12 +430,13 @@ def run_project(
                     pending_media,
                 ),
             )
-            download_media(config, database, stop_event, callback)
-            paths.update(generate_media_reports(config, database))
+            download_media(media_config, database, stop_event, callback)
+            paths.update(generate_media_reports(media_config, database))
         elif mode == "all" and config.media.enabled:
-            index_media(config, database, stop_event, callback)
-            download_media(config, database, stop_event, callback)
-            paths.update(generate_media_reports(config, database))
+            media_config = _secondary_media_config(config)
+            index_media(media_config, database, stop_event, callback)
+            download_media(media_config, database, stop_event, callback)
+            paths.update(generate_media_reports(media_config, database))
         if config.research.enabled and config.research.auto_build:
             research_summary = build_research_index(config, database, stop_event, callback)
             research_report = config.output_dir / "reports" / "research_index.json"

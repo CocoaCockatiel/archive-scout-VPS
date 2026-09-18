@@ -1,7 +1,7 @@
 # Repository details
 
 Product: Archive Scout
-Version: 1.0.6.6
+Version: 1.0.7
 License: MIT
 Python: 3.11+
 Desktop UI: Tkinter/ttk

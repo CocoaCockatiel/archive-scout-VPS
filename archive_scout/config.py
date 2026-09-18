@@ -17,6 +17,153 @@ def normalize_extension(value: str) -> str:
     return value if value.startswith(".") else "." + value
 
 
+
+
+REPORT_FIELD_NAMES: dict[str, tuple[str, ...]] = {
+    "matches_ranked": (
+        "rank", "score", "scan_run", "timestamp", "title", "original_url",
+        "wayback_url", "local_file", "mime_type", "review_status", "tags",
+        "note", "keyword_hits", "snippets", "interesting_links",
+    ),
+    "matched_urls": ("original_url",),
+    "wayback_urls": ("wayback_url",),
+    "interesting_links": ("source_url", "link"),
+    "keyword_counts": ("count", "keyword"),
+    "all_indexed_urls": ("timestamp", "mime_type", "state", "original_url"),
+    "errors": (
+        "last_seen", "operation", "category", "attempts", "retryable",
+        "http_status", "timestamp", "source", "message",
+    ),
+    "site_issues": (
+        "last_seen", "host", "stage", "category", "http_status", "occurrences", "message",
+    ),
+    "summary": (
+        "heading", "generated", "output_directory", "operation", "scan_run",
+        "keyword_set", "keyword_rules", "source_operation", "scan_started",
+        "scan_completed", "targets", "date_range", "indexed_captures",
+        "ranked_matches", "unresolved_errors", "site_issues", "states",
+    ),
+    "media_indexed": ("timestamp", "media_kind", "extension", "state", "original_url"),
+    "media_downloaded": ("timestamp", "media_kind", "bytes_saved", "local_file", "original_url"),
+    "media_wayback_urls": ("wayback_url",),
+    "media_errors": ("last_seen", "category", "attempts", "timestamp", "original_url", "message"),
+    "media_summary": (
+        "heading", "generated", "indexed_media", "downloaded", "pending",
+        "errors", "unresolved_media_errors", "snapshot_strategy",
+        "included_extensions", "excluded_extensions",
+    ),
+    "analysis_summary": (
+        "heading", "documents_processed", "forum_threads", "forum_posts", "extractions",
+        "legacy_assets", "external_assets_found", "exact_duplicate_groups",
+        "near_duplicate_groups", "grouped_documents", "snapshot_pairs",
+        "changed_snapshot_pairs", "first_appearances", "provenance_edges",
+    ),
+    "forum_threads": (
+        "canonical_key", "canonical_url", "title", "profile", "first_timestamp",
+        "last_timestamp", "post_count", "document_count",
+    ),
+    "extractions": ("document_id", "extractor", "type", "field", "value", "context"),
+    "legacy_assets": ("document_id", "url", "type", "player", "external", "archive_status", "context"),
+    "duplicate_groups": ("group_id", "method", "representative_document_id", "document_id", "similarity"),
+    "provenance": ("source_url", "source_timestamp", "mirror_url", "mirror_timestamp", "method", "similarity"),
+    "snapshot_diffs": ("earlier_url", "earlier_timestamp", "later_timestamp", "summary_json"),
+    "first_appearances": ("query", "original_url", "first_timestamp", "last_timestamp"),
+}
+
+REPORT_OUTPUT_NAMES = tuple(REPORT_FIELD_NAMES)
+RANKED_REPORT_FIELDS = REPORT_FIELD_NAMES["matches_ranked"]
+SUMMARY_REPORT_FIELDS = REPORT_FIELD_NAMES["summary"]
+MEDIA_SUMMARY_FIELDS = REPORT_FIELD_NAMES["media_summary"]
+
+
+def _ordered_enabled(values: list[str], allowed: tuple[str, ...]) -> list[str]:
+    enabled = {str(value).strip() for value in values if str(value).strip()}
+    return [name for name in allowed if name in enabled]
+
+
+def _default_report_fields() -> dict[str, list[str]]:
+    return {name: list(fields) for name, fields in REPORT_FIELD_NAMES.items()}
+
+
+@dataclass(slots=True)
+class ReportConfig:
+    """Controls every generated report and every field written to it.
+
+    Core manifest/operation data is intentionally independent of reporting: URL,
+    timestamp, queue state, retry/error state, and local-path information must
+    remain available for resume, retry, Hitlist, and project integrity. Optional
+    derived scan detail that exists only to enrich reports is not persisted when
+    no enabled report field needs it.
+    """
+
+    outputs: list[str] = field(default_factory=lambda: list(REPORT_OUTPUT_NAMES))
+    fields: dict[str, list[str]] = field(default_factory=_default_report_fields)
+
+    def normalized(self) -> "ReportConfig":
+        source = self.fields if isinstance(self.fields, dict) else {}
+        return ReportConfig(
+            outputs=_ordered_enabled(self.outputs, REPORT_OUTPUT_NAMES),
+            fields={
+                name: _ordered_enabled(list(source.get(name, REPORT_FIELD_NAMES[name])), REPORT_FIELD_NAMES[name])
+                for name in REPORT_OUTPUT_NAMES
+            },
+        )
+
+    def output_enabled(self, name: str) -> bool:
+        return name in self.outputs
+
+    def fields_for(self, name: str) -> list[str]:
+        return list(self.fields.get(name, ()))
+
+    def field_enabled(self, output: str, field_name: str) -> bool:
+        return field_name in self.fields.get(output, ())
+
+    @property
+    def ranked_fields(self) -> list[str]:
+        return self.fields_for("matches_ranked")
+
+    @property
+    def summary_fields(self) -> list[str]:
+        return self.fields_for("summary")
+
+    @property
+    def media_summary_fields(self) -> list[str]:
+        return self.fields_for("media_summary")
+
+    @property
+    def store_keyword_counts(self) -> bool:
+        return (
+            self.output_enabled("keyword_counts") and bool(self.fields_for("keyword_counts"))
+        ) or (
+            self.output_enabled("matches_ranked") and self.field_enabled("matches_ranked", "keyword_hits")
+        )
+
+    @property
+    def store_keyword_fields(self) -> bool:
+        return self.output_enabled("matches_ranked") and self.field_enabled("matches_ranked", "keyword_hits")
+
+    @property
+    def store_keyword_details(self) -> bool:
+        return self.store_keyword_counts or self.store_keyword_fields
+
+    @property
+    def store_snippets(self) -> bool:
+        return self.output_enabled("matches_ranked") and self.field_enabled("matches_ranked", "snippets")
+
+    @property
+    def store_interesting_links(self) -> bool:
+        standalone = self.output_enabled("interesting_links") and bool(self.fields_for("interesting_links"))
+        ranked = self.output_enabled("matches_ranked") and self.field_enabled("matches_ranked", "interesting_links")
+        return standalone or ranked
+
+    @property
+    def create_default_reviews(self) -> bool:
+        return self.output_enabled("matches_ranked") and self.field_enabled("matches_ranked", "review_status")
+
+    def to_payload(self) -> dict:
+        return asdict(self.normalized())
+
+
 @dataclass(slots=True)
 class KeywordSetConfig:
     name: str
@@ -256,6 +403,7 @@ class ProjectConfig:
     scan_workers: int = 0
     download_scope: str = "all_text"
     minimum_score: int = 1
+    report: ReportConfig | dict = field(default_factory=ReportConfig)
     max_file_mb: float = 25.0
     page_size: int = 100000
     cdx_delay: float = 0.75
@@ -335,6 +483,8 @@ class ProjectConfig:
         extra_params = [f"{key}={value}" for key, value in parse_cdx_parameter_lines(self.cdx_extra_params)]
         media = self.media if isinstance(self.media, MediaConfig) else MediaConfig(**self.media)
         media = media.normalized()
+        report = self.report if isinstance(self.report, ReportConfig) else ReportConfig(**self.report)
+        report = report.normalized()
         analysis = self.analysis if isinstance(self.analysis, AnalysisConfig) else AnalysisConfig(**self.analysis)
         analysis = analysis.normalized()
         ai = self.ai if isinstance(self.ai, AIConfig) else AIConfig(**self.ai)
@@ -369,6 +519,7 @@ class ProjectConfig:
             scan_workers=min(32, max(0, int(self.scan_workers))),
             download_scope=self.download_scope if self.download_scope in {"all_text", "keyword_urls", "index_only"} else "all_text",
             minimum_score=max(1, int(self.minimum_score)),
+            report=report,
             max_file_mb=max(0.1, float(self.max_file_mb)),
             page_size=min(150000, max(100, int(self.page_size))),
             cdx_delay=max(0.0, float(self.cdx_delay)),
@@ -423,6 +574,7 @@ class ProjectConfig:
         payload["output_dir"] = str(config.output_dir)
         payload["keyword_sets"] = [item.to_payload() for item in config.normalized_keyword_sets()]
         payload["media"] = config.media.to_payload() if isinstance(config.media, MediaConfig) else dict(config.media)
+        payload["report"] = config.report.to_payload() if isinstance(config.report, ReportConfig) else dict(config.report)
         payload["analysis"] = config.analysis.to_payload() if isinstance(config.analysis, AnalysisConfig) else dict(config.analysis)
         payload["ai"] = config.ai.to_payload() if isinstance(config.ai, AIConfig) else dict(config.ai)
         payload["research"] = config.research.to_payload() if isinstance(config.research, ResearchConfig) else dict(config.research)
@@ -442,6 +594,7 @@ def load_project_config(path: Path) -> ProjectConfig:
     payload = json.loads(path.read_text(encoding="utf-8"))
     keyword_sets = list(payload.get("keyword_sets") or [])
     media_payload = payload.get("media") or {}
+    report_payload = payload.get("report") or {}
     analysis_payload = payload.get("analysis") or {}
     ai_payload = payload.get("ai") or {}
     research_payload = payload.get("research") or {}
@@ -498,7 +651,7 @@ def load_project_config(path: Path) -> ProjectConfig:
     # in flight using the historical pageSize=9 grouping. Upgrade only the
     # untouched v1.0.4 automatic indexing profile.
     if (
-        saved_version not in {"1.0.6.2", "1.0.6.3", "1.0.6.4", "1.0.6.5", "1.0.6.6"}
+        saved_version not in {"1.0.6.2", "1.0.6.3", "1.0.6.4", "1.0.6.5", "1.0.6.6", "1.0.7"}
         and loaded_page_size == 100000
         and loaded_cdx_delay == 0.75
         and loaded_page_blocks == 0
@@ -506,6 +659,36 @@ def load_project_config(path: Path) -> ProjectConfig:
         and str(network_payload.get("index_strategy", "auto")).casefold() == "auto"
     ):
         loaded_page_blocks = 9
+    # A short-lived v1.0.7 draft used one Interesting Links boolean. Preserve
+    # that preference when opening such a project while upgrading it to the
+    # comprehensive report configuration.
+    if not report_payload and payload.get("include_interesting_links") is False:
+        compatible_fields = _default_report_fields()
+        compatible_fields["matches_ranked"] = [
+            name for name in RANKED_REPORT_FIELDS if name != "interesting_links"
+        ]
+        report_payload = {
+            "outputs": [name for name in REPORT_OUTPUT_NAMES if name != "interesting_links"],
+            "fields": compatible_fields,
+        }
+
+    report_fields_payload = report_payload.get("fields")
+    if not isinstance(report_fields_payload, dict):
+        # Upgrade the first v1.0.7 draft, which exposed only three specialized
+        # field lists, into the complete per-output/per-field matrix.
+        report_fields_payload = _default_report_fields()
+        if "ranked_fields" in report_payload:
+            report_fields_payload["matches_ranked"] = list(report_payload["ranked_fields"])
+        if "summary_fields" in report_payload:
+            report_fields_payload["summary"] = list(report_payload["summary_fields"])
+        if "media_summary_fields" in report_payload:
+            report_fields_payload["media_summary"] = list(report_payload["media_summary_fields"])
+    else:
+        report_fields_payload = {
+            str(name): list(values) if isinstance(values, (list, tuple)) else []
+            for name, values in report_fields_payload.items()
+        }
+
     # v1.0.3 shipped conservative replay defaults (4 workers, 0.5 s
     # between request starts). Upgrade only that untouched pair to the v1.0.4
     # high-throughput replay profile: ten persistent connections and eight
@@ -531,6 +714,17 @@ def load_project_config(path: Path) -> ProjectConfig:
         scan_workers=int(payload.get("scan_workers", 0)),
         download_scope=str(payload.get("download_scope", "all_text")),
         minimum_score=int(payload.get("minimum_score", 1)),
+        report=ReportConfig(
+            outputs=list(report_payload["outputs"]) if "outputs" in report_payload else list(REPORT_OUTPUT_NAMES),
+            fields={
+                name: (
+                    list(report_fields_payload[name])
+                    if name in report_fields_payload
+                    else list(REPORT_FIELD_NAMES[name])
+                )
+                for name in REPORT_OUTPUT_NAMES
+            },
+        ),
         max_file_mb=float(payload.get("max_file_mb", 25.0)),
         page_size=loaded_page_size,
         cdx_delay=loaded_cdx_delay,

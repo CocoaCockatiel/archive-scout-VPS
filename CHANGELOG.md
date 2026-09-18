@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.7
+
+- Keeps the v1.0.5-style acquisition envelope intact: native Timemap `pageSize=9`, ten bounded CDX workers at the established 0.75-second shared spacing, and ten replay workers at 0.125-second request-start spacing, while retaining durable page/download resume and later correctness safeguards.
+- Fixes the indefinite `Starting…` failure mode by creating the operation worker before bundle validation, database setup/migrations, backups, and other potentially slow initialization; synchronous dashboard recounting is no longer on the pre-worker Start path.
+- Extends **Also download media during text and download-only runs** to acquisition-only projects with the same embedded/external-host and media filtering controls, without creating scan jobs or fake document rows.
+- Separates follow-up media CDX settings from the primary text query. Normal `earliest` follow-up media defaults to `collapse=urlkey` (one archived timestamp per media URL); explicit media `latest`/`all` policy remains meaningful, and text collapse settings are never mutated.
+- Adds complete report customization. Users can independently enable/disable every standard text/index/error/media/archive-analysis report and every field or column written inside each report.
+- Avoids report-only SQLite bloat: snippets, Interesting Links payloads, keyword-hit counts/field lists, and untouched default review rows are not computed/stored when no enabled report field needs them. Core capture/resume/error state remains independent of reporting.
+- Removes stale disabled report files when reports are regenerated so an old output cannot look like a current enabled report.
+- Preserves schema version 8; no database migration is required.
+
 ## 1.0.6.6
 
 - Rebuilds automatic numbered-page indexing around the attached reference downloader's proven Timemap model: native `/web/timemap/json`, `pageSize=9`, ten bounded workers, the existing 80-requests/minute envelope, and 1,000-page rolling scheduling.

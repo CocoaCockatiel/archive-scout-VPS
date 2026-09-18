@@ -1092,9 +1092,11 @@ def _discover_document_media(
     target_host_set: set[str],
     external_only: bool,
     row: dict,
-) -> tuple[int, str, list[tuple[str, int | None, str, str]]]:
-    """Pure local worker used by embedded-media discovery."""
-    document_id = int(row["id"])
+) -> tuple[int, int | None, str, list[tuple[str, int | None, str, str]]]:
+    """Pure local worker used by saved-page embedded-media discovery."""
+    page_id = int(row["id"])
+    source_document_id_value = row.get("source_document_id", row.get("id"))
+    source_document_id = int(source_document_id_value) if source_document_id_value is not None else None
     content_hash = str(row.get("content_hash") or "")
     known_links = [str(value) for value in json_value(row.get("links_json"), []) if str(value).strip()]
     raw = safe_document_text(output_dir, str(row.get("path") or ""), max_file_bytes)
@@ -1111,11 +1113,11 @@ def _discover_document_media(
             continue
         batch.append((
             item.url,
-            document_id,
+            source_document_id,
             "external_embedded" if is_external else "embedded",
             item.kind_hint,
         ))
-    return document_id, content_hash, batch
+    return page_id, source_document_id, content_hash, batch
 
 
 def _discover_embedded_queue(
@@ -1127,7 +1129,7 @@ def _discover_embedded_queue(
     *,
     external_only: bool,
 ) -> int:
-    """Discover media from saved documents with bounded local parallelism.
+    """Discover media from saved pages with bounded local parallelism.
 
     SQLite access remains on the operation thread. File reads and HTML/player
     parsing run in a small worker pool, so large projects no longer serialize
@@ -1141,17 +1143,28 @@ def _discover_embedded_queue(
     # optional direct-media targets must not change that boundary.
     discovery_targets = config.targets if external_only else (media.targets or config.targets)
     targets = target_hosts(discovery_targets)
-    total = int(database.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
+    document_total = int(database.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
+    unscanned_total = int(database.execute(
+        "SELECT COUNT(*) FROM captures WHERE state='downloaded_unscanned' AND local_path IS NOT NULL"
+    ).fetchone()[0])
+    total = document_total + unscanned_total
     scanned = queued = 0
     cursor = database.execute(
         """
-        SELECT d.id,d.path,d.links_json,d.content_hash,c.original_url,
+        SELECT 'document' AS source_kind,d.id,d.id AS source_document_id,
+               d.path,d.links_json,d.content_hash,c.original_url,
                mdd.content_hash AS discovery_content_hash
         FROM documents d
         JOIN captures c ON c.id=d.capture_id
         LEFT JOIN media_discovery_documents mdd
           ON mdd.document_id=d.id AND mdd.query_signature=?
-        ORDER BY d.id
+        UNION ALL
+        SELECT 'capture' AS source_kind,c.id,NULL AS source_document_id,
+               c.local_path AS path,'[]' AS links_json,c.content_hash,c.original_url,
+               NULL AS discovery_content_hash
+        FROM captures c
+        WHERE c.state='downloaded_unscanned' AND c.local_path IS NOT NULL
+        ORDER BY source_kind,id
         """,
         (signature,),
     )
@@ -1166,9 +1179,9 @@ def _discover_embedded_queue(
             for row in rows:
                 if stop_event.is_set():
                     raise Stopped
-                document_id = int(row["id"])
+                source_document_id = row["source_document_id"]
                 content_hash = str(row["content_hash"] or "")
-                if str(row["discovery_content_hash"] or "") == content_hash and content_hash:
+                if source_document_id is not None and str(row["discovery_content_hash"] or "") == content_hash and content_hash:
                     scanned += 1
                     continue
                 futures.append(pool.submit(
@@ -1180,7 +1193,7 @@ def _discover_embedded_queue(
                     external_only,
                     dict(row),
                 ))
-            completed_results: list[tuple[int, str, list[tuple[str, int | None, str, str]]]] = []
+            completed_results: list[tuple[int, int | None, str, list[tuple[str, int | None, str, str]]]] = []
             for future in concurrent.futures.as_completed(futures):
                 if stop_event.is_set():
                     for pending in futures:
@@ -1191,9 +1204,10 @@ def _discover_embedded_queue(
             # transaction boundary per document. Worker threads never touch SQLite.
             if completed_results:
                 with database:
-                    for document_id, content_hash, discovered in completed_results:
+                    for _page_id, source_document_id, content_hash, discovered in completed_results:
                         queued += queue_media_discovery_candidates(database, signature, discovered)
-                        mark_media_discovery_document(database, signature, document_id, content_hash, len(discovered))
+                        if source_document_id is not None:
+                            mark_media_discovery_document(database, signature, source_document_id, content_hash, len(discovered))
                         scanned += 1
             if callback and (scanned == total or scanned % 100 == 0):
                 callback(ProgressEvent(

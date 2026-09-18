@@ -151,6 +151,10 @@ def analyze_content(
     prefilter: KeywordPrefilter | None = None,
     prepared_fields: dict[str, str] | None = None,
     prepared_normalized_fields: dict[str, str] | None = None,
+    *,
+    include_hit_fields: bool = True,
+    include_snippets: bool = True,
+    include_interesting_links: bool = True,
 ) -> dict:
     if prepared_fields is None or prepared_normalized_fields is None:
         fields, normalized_fields = prepare_analysis_fields(original, title, visible, raw, links)
@@ -186,7 +190,8 @@ def analyze_content(
                 for item in literal_map.get(expression, ()):
                     label = item.rule.label
                     hits[label] += count
-                    hit_fields.setdefault(label, set()).add(field_name)
+                    if include_hit_fields:
+                        hit_fields.setdefault(label, set()).add(field_name)
                     matched_rules[label] = item
                     if item.rule.kind == "excluded":
                         excluded_labels.add(label)
@@ -200,7 +205,8 @@ def analyze_content(
                 continue
             label = item.rule.label
             hits[label] += count
-            hit_fields.setdefault(label, set()).add(field_name)
+            if include_hit_fields:
+                hit_fields.setdefault(label, set()).add(field_name)
             matched_rules[label] = item
             if item.rule.kind == "excluded":
                 excluded_labels.add(label)
@@ -243,8 +249,16 @@ def analyze_content(
 
     if excluded or missing_required:
         score = 0
-    interesting_links = sorted({link for link in links if link_is_interesting(link, patterns, prefilter)})
-    snippets = make_snippets(visible or raw, positive_matched_rules) if positive_matched_rules else []
+    interesting_links = (
+        sorted({link for link in links if link_is_interesting(link, patterns, prefilter)})
+        if include_interesting_links
+        else []
+    )
+    snippets = (
+        make_snippets(visible or raw, positive_matched_rules)
+        if include_snippets and positive_matched_rules
+        else []
+    )
     return {
         "score": int(round(score)),
         "hits": dict(sorted(hits.items())),

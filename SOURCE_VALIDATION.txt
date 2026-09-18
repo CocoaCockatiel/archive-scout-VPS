@@ -1,48 +1,63 @@
-Archive Scout 1.0.6.6 source validation
+Archive Scout 1.0.7 source validation
 Date: 2026-09-17
 
 Release scope
-- Replaces fragile automatic indexing recovery with a reference-style native Timemap JSON pipeline.
-- Prevents one failed page from downgrading and replaying an otherwise successful year through broad resume-key windows.
-- Adds live page-level progress during the existing 1,000-page rolling schedule.
-- Applies the same correction to direct media indexing.
+- Preserves the v1.0.5-style high-throughput acquisition envelope already restored in the 1.0.6.x line: ten CDX workers, native Timemap paging, 0.75-second CDX spacing, ten replay workers, and 0.125-second replay request spacing by default.
+- Moves expensive startup preparation off the Tk/UI thread so Start creates a worker immediately instead of remaining indefinitely at "Starting..." while bundle/database preparation blocks the interface.
+- Extends optional follow-up media acquisition to Index and download only (no scanning) runs while preserving the lean acquisition-only database model.
+- Keeps primary text/index CDX settings independent from secondary media indexing. Default/earliest follow-up media uses collapse=urlkey (one timestamp per normalized media URL); explicit media latest/all choices remain media-only overrides.
+- Adds a comprehensive Reports matrix: each standard text/index/error/media/archive-analysis report can be enabled or disabled, and every field/section in those reports can be individually included or excluded.
+- Avoids computing and persisting report-only scan enrichment when no enabled report needs it. Existing obsolete hit-detail, snippet, interesting-link, and untouched default-review payloads are cleared once when the report-storage policy changes.
 - Database schema remains version 8. No destructive project migration is introduced.
 
-Reference comparison
-- The attached Wayback downloader uses /web/timemap/json, pageSize=9, ten concurrent requests, an 80-requests/minute limiter, 1,000-page task groups, and five attempts per request.
-- Archive Scout retains that proven acquisition envelope while preserving durable SQLite page checkpoints, shared 429/503 handling, pause/resume state, classified errors, and per-project capture metadata.
-- Automatic numbered pages now use one native JSON endpoint and one representation per attempt. Generic resume-key CDX recovery remains separate.
+Report customization and SQLite behavior
+- Report output and field selections persist in project.json through ReportConfig.
+- Disabling a report removes stale generated copies rather than leaving an old report that no longer reflects project settings.
+- Keyword hit-count JSON is persisted only when keyword counts or ranked keyword-hit output requires it.
+- Keyword field-detail JSON is persisted only when ranked keyword-hit detail requires it.
+- Snippet JSON is persisted only when ranked snippets are enabled.
+- Interesting-link JSON is persisted only when the standalone Interesting Links report or ranked Interesting Links section is enabled.
+- Untouched default "unreviewed" review rows are not created when ranked review status is disabled; genuine human review state is preserved.
+- A report-storage policy fingerprint in project_meta prevents repeated whole-table cleanup work on every report generation.
+- Core project state is intentionally not treated as report-only data: capture URLs/timestamps, queue states, local paths, retry/error state, scores/linkage required by active operations, and other resume/integrity records remain available even if corresponding report fields are hidden.
+- SQLite may retain free pages after old report-only values are nulled/deleted until Compact Project/VACUUM reclaims them physically; the disabled payloads are no longer live data and new rows do not recreate them.
 
-Request behavior
-- Timemap page counts omit the unused fl field.
-- Timemap numbered pages request timestamp, original, mimetype, statuscode, digest, and length. The resume-only urlkey field is omitted.
-- Page counts receive at least five native-JSON attempts for transient server/read failures before pagination fallback.
-- Complete multi-backend connection failures return immediately to the operation-wide connection circuit rather than multiplying one DNS/proxy/TLS outage by five.
-- A malformed or truncated numbered-page JSON body is rejected. It is never accepted as text and never triggers a text-format request for that page.
+Download-only media behavior
+- The download-only path still performs no keyword/document scan and does not create fake scan jobs merely to enable media acquisition.
+- When media is enabled, download-only can index/download images and videos after its normal capture acquisition.
+- Applicable Media-page settings carry through, including image/video selection, embedded discovery, external-host permission, extension filters, maximum media size, and media snapshot strategy.
+- Embedded-media discovery can inspect downloaded_unscanned capture files directly and queue discovered media with a nullable source_document_id, leaving the documents table untouched.
+- Existing durable media discovery/download tables continue to provide resume and deduplication state without a schema change.
 
-Failure isolation and resume
-- Page failures remain in durable retry_pages/page_failures state while successful page rows and checkpoints commit atomically.
-- One page receives five attempts without resetting the numbered-page plan.
-- If an isolated page remains unavailable, Archive Scout pauses and saves only the exact failed page numbers. Resume continues those pages directly.
-- Resume-key traversal remains the fallback when pagination is unsupported or the page-count operation remains unavailable after its retry budget.
-- Existing v1.0.6.x numbered-page plans and completed index_pages/media_index_pages checkpoints remain compatible.
+Text/media CDX isolation
+- The primary text/index ProjectConfig is never mutated merely because follow-up media is enabled.
+- Default/earliest secondary media indexing derives a separate config with collapse=urlkey.
+- Explicit media latest/all strategies do not impose the automatic urlkey collapse on that media query.
+- Dedicated text collapse choices continue to apply only to the primary text/index query.
 
-Progress behavior
-- Main and direct-media indexing emit live progress during a 1,000-page scheduling block.
-- Progress includes completed Timemap pages, total Timemap pages, pages completed in the current block, and capture counts.
+Startup behavior
+- GUI Start performs lightweight form/config validation, enters indeterminate Starting state, and creates the worker before frozen-bundle validation or operation/database initialization.
+- Bundle validation and subsequent heavyweight operation preparation run inside the worker and surface success/failure through the normal event path.
+- The pre-worker synchronous dashboard recount was removed from Start.
 
-Regression coverage
-- Native Timemap page failures produce exactly one JSON request per attempt and no text request.
-- Page counting receives five transient attempts.
-- A persistent isolated page is attempted five times, successful sibling pages remain stored, no resume-key request occurs, and only the failed page is saved.
-- Automatic paging uses only the native Timemap JSON endpoint.
-- Page-count and numbered-page parameter sets omit unnecessary fields.
-- Live page-progress events are emitted.
-- Main and media indexing continue to use bounded parallel paging and durable completion checkpoints.
+Automation compatibility
+- Existing CLI text/JSON/JSONL automation interfaces remain the bot/integration contract.
+- No Discord-specific runtime dependency, Rich Presence loop, or acquisition-hot-path bot activity was added for 1.0.7.
+- Read-only automation commands retain query-only database behavior.
+
+Regression coverage added for 1.0.7
+- Secondary media collapse is isolated from the primary text query.
+- Comprehensive report matrices round-trip through project.json, including intentionally empty field selections.
+- Disabled snippets, interesting-link filtering, keyword-detail payloads, and default review rows are not computed/stored when not required.
+- Changing an existing project to a lean report policy clears obsolete report-only payloads once and then reuses the saved policy fingerprint.
+- Download-only executes the optional media pipeline without creating scan jobs and preserves external-media settings.
+- Embedded-media discovery works directly from downloaded_unscanned capture files without creating documents.
+- Start creates the worker before slow bundle/dashboard initialization.
+- The high-throughput default profile remains ten replay workers, ten CDX workers, 0.75-second CDX spacing, and 0.125-second replay spacing.
 
 Local automated validation
-- Full suite: 232 tests run, 231 passed, 1 environment skip, 0 failed.
+- Full unit/integration/migration suite: 240 tests run, 237 passed, 3 environment-dependent skips, 0 failed.
 - Python compileall passes for archive_scout, tests, and scripts.
-- The built package reports Archive Scout 1.0.6.6.
-- Offline 100,000-row benchmark completed with 100,000 inserts, zero duplicate work, zero HTTP attempts, and zero unchanged-row rewrites.
+- Offline 100,000-row benchmark completed with 100,000 inserts, 4 database transactions, zero duplicate work, zero HTTP attempts, and zero unchanged-row rewrites.
+- Database schema remains 8.
 - Native multi-platform GitHub Actions/build smoke tests must still run on the exact release commit before publishing platform binaries.

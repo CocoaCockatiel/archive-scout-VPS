@@ -52,7 +52,7 @@ class RetryTests(unittest.TestCase):
             config = ProjectConfig(output_dir=root, targets=["example.com/*"], keywords=["alpha"])
             captured = {"documents": [], "captures": []}
 
-            def fake_rescan(database, scan_run_id, keywords, stop_event, callback, document_ids, workers=None):
+            def fake_rescan(database, scan_run_id, keywords, stop_event, callback, document_ids, workers=None, report_config=None):
                 captured["documents"].extend(document_ids)
 
             def fake_download(config, database, scan_run_id, stop_event, callback, states, capture_ids):

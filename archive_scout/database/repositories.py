@@ -346,16 +346,27 @@ def upsert_document(
         _fts_replace_document(database, document_id, title, body_text, original, row)
     return document_id
 
-def save_match(database: sqlite3.Connection, scan_run_id: int, document_id: int, analysis: dict) -> int:
+def save_match(
+    database: sqlite3.Connection,
+    scan_run_id: int,
+    document_id: int,
+    analysis: dict,
+    report_config=None,
+) -> int:
     now = utc_now()
+    store_keyword_counts = report_config is None or bool(report_config.store_keyword_counts)
+    store_keyword_fields = report_config is None or bool(report_config.store_keyword_fields)
+    store_snippets = report_config is None or bool(report_config.store_snippets)
+    store_interesting_links = report_config is None or bool(report_config.store_interesting_links)
+    create_default_reviews = report_config is None or bool(report_config.create_default_reviews)
     values = (
         scan_run_id,
         document_id,
         int(round(float(analysis.get("score") or 0))),
-        json.dumps(analysis.get("hits") or {}, ensure_ascii=False, sort_keys=True),
-        json.dumps(analysis.get("hit_fields") or {}, ensure_ascii=False, sort_keys=True),
-        json.dumps(analysis.get("snippets") or [], ensure_ascii=False),
-        json.dumps(analysis.get("interesting_links") or [], ensure_ascii=False),
+        (json.dumps(analysis.get("hits") or {}, ensure_ascii=False, sort_keys=True) if store_keyword_counts else None),
+        (json.dumps(analysis.get("hit_fields") or {}, ensure_ascii=False, sort_keys=True) if store_keyword_fields else None),
+        (json.dumps(analysis.get("snippets") or [], ensure_ascii=False) if store_snippets else None),
+        (json.dumps(analysis.get("interesting_links") or [], ensure_ascii=False) if store_interesting_links else None),
         int(bool(analysis.get("excluded"))),
         int(bool(analysis.get("required_missing"))),
         json.dumps(analysis.get("proximity") or {}, ensure_ascii=False, sort_keys=True),
@@ -398,8 +409,63 @@ def save_match(database: sqlite3.Connection, scan_run_id: int, document_id: int,
         # path using that table. Remove legacy duplicates and do not recreate
         # them for v1.0.6 matches.
         database.execute("DELETE FROM keyword_hits WHERE match_id=?", (match_id,))
-    database.execute("INSERT OR IGNORE INTO reviews(match_id,status) VALUES(?,'unreviewed')", (match_id,))
+    if create_default_reviews:
+        database.execute("INSERT OR IGNORE INTO reviews(match_id,status) VALUES(?,'unreviewed')", (match_id,))
+    else:
+        # Default, untouched review rows exist solely to print "unreviewed" in
+        # reports. Do not keep them when that field is disabled; preserve any
+        # actual human review state.
+        database.execute(
+            "DELETE FROM reviews WHERE match_id=? AND status='unreviewed' AND reviewer IS NULL AND reviewed_at IS NULL",
+            (match_id,),
+        )
     return match_id
+
+
+def apply_report_storage_policy(database: sqlite3.Connection, report_config) -> int:
+    """Drop obsolete report-only payloads once when report preferences change.
+
+    The policy fingerprint lives in project_meta, so large document_matches tables
+    are not revisited on every operation. Core match score/linkage and all capture
+    manifest/retry state remain untouched. SQLite may retain freed pages until a
+    later Compact Project/VACUUM, but disabled enrichment is no longer live data
+    and no new rows store it.
+    """
+    report = report_config.normalized() if hasattr(report_config, "normalized") else report_config
+    policy = {
+        "hits": bool(report.store_keyword_counts),
+        "hit_fields": bool(report.store_keyword_fields),
+        "snippets": bool(report.store_snippets),
+        "interesting_links": bool(report.store_interesting_links),
+        "default_reviews": bool(report.create_default_reviews),
+    }
+    fingerprint = json.dumps(policy, sort_keys=True, separators=(",", ":"))
+    row = database.execute(
+        "SELECT value FROM project_meta WHERE key='report_storage_policy_v1'"
+    ).fetchone()
+    if row and str(row[0]) == fingerprint:
+        return 0
+
+    before = database.total_changes
+    if not policy["hits"]:
+        database.execute("UPDATE document_matches SET hits_json=NULL WHERE hits_json IS NOT NULL")
+    if not policy["hit_fields"]:
+        database.execute("UPDATE document_matches SET fields_json=NULL WHERE fields_json IS NOT NULL")
+    if not policy["snippets"]:
+        database.execute("UPDATE document_matches SET snippets_json=NULL WHERE snippets_json IS NOT NULL")
+    if not policy["interesting_links"]:
+        database.execute(
+            "UPDATE document_matches SET interesting_links_json=NULL WHERE interesting_links_json IS NOT NULL"
+        )
+    if not policy["default_reviews"]:
+        database.execute(
+            "DELETE FROM reviews WHERE status='unreviewed' AND reviewer IS NULL AND reviewed_at IS NULL"
+        )
+    database.execute(
+        "INSERT OR REPLACE INTO project_meta(key,value) VALUES('report_storage_policy_v1',?)",
+        (fingerprint,),
+    )
+    return database.total_changes - before
 
 
 def record_recovery_event(

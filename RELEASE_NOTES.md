@@ -1,3 +1,32 @@
+# Archive Scout 1.0.7
+
+Archive Scout 1.0.7 focuses on the post-1.0.6 performance/reliability issues without replacing the proven acquisition architecture. The v1.0.5-style Timemap and replay pacing remains the baseline, while startup no longer performs potentially heavy project preparation on Tk's Start path. The release also makes follow-up media available to download-only projects and turns report generation into a complete per-file/per-field configuration rather than a fixed export.
+
+## Startup and throughput
+
+- Start immediately creates a worker and displays indeterminate progress before bundle validation, database opening/migration, backups, or engine setup can do slow work. Errors from those steps return through the normal worker event channel instead of leaving the UI indefinitely at `Starting…`.
+- The established fast profile remains unchanged: ten CDX workers, native Timemap `pageSize=9` automatic paging, 0.75-second CDX request spacing, ten replay workers, and 0.125-second replay request-start spacing.
+- Existing page checkpoints, download staging, bounded scanner backlogs, content sniffing, and pause/resume behavior remain in place.
+
+## Download-only media
+
+- **Also download media during text and download-only runs** now applies to the acquisition-only workflow. Images/videos, embedded-media discovery, external-host permission, extension filters, size limit, and snapshot strategy use the same Media-page settings.
+- Embedded discovery can inspect `downloaded_unscanned` capture files directly and queues media without inventing scan/document rows.
+- Follow-up media is a separate CDX pipeline. The default `earliest` strategy uses `collapse=urlkey` so one archived timestamp is selected per media URL; the primary text query retains exactly the user's own collapse settings.
+- Media discovery/download state remains in the existing durable schema-8 queues for resume.
+
+## Fully customizable reports and leaner SQLite
+
+- The new **Reports** page exposes every standard text/index/error/media/archive-analysis output and every field/column inside those outputs. A file can be disabled entirely, or kept with only selected fields.
+- Disabled files are removed when their report family is regenerated, preventing stale outputs from being mistaken for current results.
+- Report-only derived data is demand-driven. Snippets and Interesting Links are not even computed when no enabled output needs them. Keyword-hit JSON/field detail and untouched default `unreviewed` rows are not stored when their enabled report fields do not require them.
+- URL/timestamp/path/queue/retry/error records remain core project state and are never removed merely because a report field is hidden, preserving Resume, Retry, Results, and Search with Hitlist correctness.
+- Database schema remains version 8; existing projects open without migration. Older project files without report settings retain the historical all-reports/all-fields behavior.
+
+## Automation compatibility
+
+The GUI and `ArchiveScoutCLI` continue to use the same operations engine. JSON/JSONL automation output remains isolated from diagnostics, and v1.0.7 adds no Discord-specific dependency or hot-path activity work that could reduce indexing or download throughput.
+
 # Archive Scout 1.0.6.6
 
 Archive Scout 1.0.6.6 replaces the automatic indexing recovery behavior with a simpler native Timemap JSON pipeline based on the attached high-throughput Wayback downloader. The previous engine could keep successful pages but still abandon the entire numbered-page plan after one page failed twice, then rebuild that year as slower resume-key windows. On large targets that could repeat substantial work and make indexing appear nearly unusable.
