@@ -11,12 +11,20 @@ from datetime import datetime, timedelta
 from typing import Callable
 
 from ..config import ProjectConfig
-from ..database.repositories import get_or_create_target, record_error, record_site_issue, upsert_captures
+from ..database.repositories import get_or_create_target, record_error, record_recovery_event, record_site_issue, upsert_captures
 from ..downloads.rate_limit import SharedFixedRateLimiter, shared_host_gate
 from ..events import ConnectivityPaused, ProgressEvent, Stopped
 from ..site_status import host_from_url, site_issue_message
 from ..utils import utc_now
-from .client import HttpClient, PermanentRequestError, RateLimitDeferred, TransientRequestError, is_timeout_error, request_cdx_rows
+from .client import (
+    HttpClient,
+    PermanentRequestError,
+    RateLimitDeferred,
+    TransientRequestError,
+    is_timeout_error,
+    request_cdx_json_payload,
+    request_cdx_rows,
+)
 from .parallel import PageFetchResult, effective_page_workers, iter_cdx_pages
 from .parameters import (
     build_cdx_params,
@@ -33,6 +41,8 @@ from .parameters import (
 
 
 PAGED_PIPELINE_PAGES = 1000
+PAGED_REQUEST_ATTEMPTS = 5
+PAGED_PAGE_FAILURE_LIMIT = 5
 
 
 @dataclass(slots=True)
@@ -390,12 +400,10 @@ def _defer_transient_window(
     message = f"{type(exc).__name__}: {exc}"
     network = config.network.normalized()
     with database:
-        error_id = record_error(
-            database,
-            "index",
-            "transient_index_delay",
+        record_recovery_event(
+            database, "index", "transient_index_delay",
             f"{window_label(current.start, current.end)}: {message}",
-            retryable=True,
+            details={"failures": current.failures, "strategy": current.strategy},
         )
         _record_network_event(
             database,
@@ -565,6 +573,57 @@ def _select_page_batch(current: PendingWindow, workers: int) -> tuple[list[int],
     return pages, next_page
 
 
+def _request_paged_count(
+    client: HttpClient,
+    endpoints: tuple[str, ...],
+    params: list[tuple[str, str]],
+    config: ProjectConfig,
+    stop_event: threading.Event,
+) -> int:
+    """Retry the small native-JSON page count before abandoning Timemap.
+
+    The reference downloader gives every Timemap request five attempts.  A
+    single count timeout previously pushed Archive Scout into its much slower
+    resume-window fallback immediately.
+    """
+    attempts = max(PAGED_REQUEST_ATTEMPTS, int(config.retries))
+    last_error: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        if stop_event.is_set():
+            raise Stopped
+        try:
+            payload = request_cdx_json_payload(
+                client,
+                endpoints,
+                params,
+                max_bytes=1024 * 1024,
+            )
+            return parse_num_pages(payload)
+        except (RateLimitDeferred, PermanentRequestError, Stopped):
+            raise
+        except TransientRequestError as exc:
+            last_error = exc
+            # One connection_failed result already represents a complete pass
+            # through the configured independent transports. Hand it back to
+            # the operation-wide connection circuit instead of multiplying a
+            # DNS/proxy/TLS outage by five more multi-backend passes.
+            if exc.connection_failed:
+                raise
+            if attempt >= attempts:
+                raise
+            retry_callback = getattr(client, "retry_callback", None)
+            if retry_callback:
+                retry_callback(
+                    attempt + 1,
+                    attempts,
+                    "Timemap page-count request failed; retrying native JSON",
+                    0.0,
+                )
+    if last_error is not None:
+        raise last_error
+    raise TransientRequestError("Timemap page-count request failed", splittable=True)
+
+
 def _request_paged_batch(
     client: HttpClient,
     config: ProjectConfig,
@@ -572,17 +631,18 @@ def _request_paged_batch(
     current: PendingWindow,
     stop_event: threading.Event,
     consume_success: Callable[[PageFetchResult], None] | None = None,
+    completed_pages: set[int] | None = None,
 ) -> PagedBatch:
     endpoints = cdx_paged_endpoints(config)
     network = config.network.normalized()
     if current.page_count < 0:
-        count_payload = client.get_cdx_any(
+        current.page_count = _request_paged_count(
+            client,
             endpoints,
             build_num_pages_params(config, target, current.start, current.end, current.page_blocks),
-            max_bytes=1024 * 1024,
-            prefer_text=False,
+            config,
+            stop_event,
         )
-        current.page_count = parse_num_pages(count_payload)
         current.page = min(current.page, current.page_count)
         current.retry_pages = [page for page in current.retry_pages if page < current.page_count]
     if current.page >= current.page_count and not current.retry_pages:
@@ -593,13 +653,18 @@ def _request_paged_batch(
     # downloader's 1,000-page task chunks. A single slow Timemap page no longer
     # creates a barrier that leaves the other nine workers idle.
     pages, next_page = _select_page_batch(current, max(page_workers, PAGED_PIPELINE_PAGES))
-    if not pages:
-        return PagedBatch([], [], True)
+    completed_pages = completed_pages or set()
+    requested_pages = [page for page in pages if page not in completed_pages]
+    if not requested_pages:
+        current.page = next_page
+        current.retry_pages = [page for page in current.retry_pages if page not in completed_pages]
+        finished = current.page >= current.page_count and not current.retry_pages
+        return PagedBatch([], pages, finished)
     results: list[PageFetchResult] = []
     for result in iter_cdx_pages(
         client,
         endpoints,
-        pages,
+        requested_pages,
         lambda page: build_paged_cdx_params(config, target, current.start, current.end, page, current.page_blocks),
         stop_event,
         workers=page_workers,
@@ -608,6 +673,7 @@ def _request_paged_batch(
         # concurrency is independently capped by effective_page_workers().
         max_bytes=(192 * 1024 * 1024 if current.page_blocks <= 0 else max(64 * 1024 * 1024, current.page_blocks * 12 * 1024 * 1024)),
         prefer_text=False,
+        json_only=True,
     ):
         if result.succeeded and consume_success is not None:
             consume_success(result)
@@ -748,22 +814,60 @@ def index_archive(
                         received = 0
                         changed = 0
                         write_seconds = 0.0
+                        batch_pages_done = 0
+                        last_page_progress = time.monotonic()
+
+                        completed_pages = {
+                            int(row[0]) for row in database.execute(
+                                """SELECT page FROM index_pages WHERE query_signature=? AND target_id=?
+                                   AND window_start=? AND window_end=? AND status='complete'""",
+                                (signature, target_id, current.start, current.end),
+                            )
+                        }
 
                         def store_completed_page(result: PageFetchResult) -> None:
-                            nonlocal received, changed, write_seconds
+                            nonlocal received, changed, write_seconds, batch_pages_done, last_page_progress
                             page_received = len(result.rows)
                             write_started = time.monotonic()
+                            # Capture rows and their page checkpoint are one
+                            # transaction: after a power loss the page is either
+                            # wholly eligible for retry or already known complete.
                             with database:
                                 changed += upsert_captures(database, result.rows, target_id, signature)
+                                database.execute(
+                                    """INSERT INTO index_pages(query_signature,target_id,window_start,window_end,page,row_count,status,updated_at)
+                                       VALUES(?,?,?,?,?,?,'complete',?)
+                                       ON CONFLICT(query_signature,target_id,window_start,window_end,page) DO UPDATE SET
+                                       row_count=excluded.row_count,status='complete',updated_at=excluded.updated_at""",
+                                    (signature, target_id, current.start, current.end, int(result.page), page_received, utc_now()),
+                                )
+                            completed_pages.add(int(result.page))
                             write_seconds += time.monotonic() - write_started
                             received += page_received
+                            batch_pages_done += 1
+                            now = time.monotonic()
+                            if (
+                                now - last_page_progress >= 1.0
+                                or len(completed_pages) >= current.page_count
+                            ):
+                                emit(
+                                    callback,
+                                    ProgressEvent(
+                                        "index",
+                                        f"{target} {label}: completed {len(completed_pages):,}/{current.page_count:,} Timemap pages; "
+                                        f"this block finished {batch_pages_done:,} pages and received {received:,} captures",
+                                        completed_windows,
+                                        total_windows,
+                                    ),
+                                )
+                                last_page_progress = now
                             # Release the largest object while sibling requests
                             # are still in flight instead of retaining a full
                             # worker batch in memory.
                             result.rows.clear()
 
                         batch = _request_paged_batch(
-                            client, target_config, target, current, stop_event, store_completed_page
+                            client, target_config, target, current, stop_event, store_completed_page, completed_pages
                         )
                         request_seconds = max(0.0, time.monotonic() - request_started - write_seconds)
                         successes = batch.successful
@@ -807,41 +911,6 @@ def index_archive(
                             # connection circuit instead of being mistaken for one
                             # repeatedly slow CDX page.
                             raise failure_exc
-                        if max(current.page_failures.values(), default=0) >= 2:
-                            # One CDX page can be pathologically expensive even
-                            # when its siblings succeed. Do not let that page hold
-                            # the entire year hostage. Preserve successful rows,
-                            # then continue the affected date range using smaller
-                            # resume-key windows and a reduced transport page size.
-                            current.strategy = "resume"
-                            current.pagination_supported = False
-                            current.page = 0
-                            current.page_count = -1
-                            current.resume_key = None
-                            current.retry_pages.clear()
-                            current.page_failures.clear()
-                            current.failures = 0
-                            current.page_size = max(100, target_config.page_size // 2)
-                            parts = split_window(current)
-                            if parts:
-                                for part in parts:
-                                    part.strategy = "resume"
-                                    part.pagination_supported = False
-                                plan.pending[0:1] = parts
-                                added = len(parts) - 1
-                                plan.planned += added
-                                total_windows += added
-                            with database:
-                                error_id = record_error(
-                                    database,
-                                    "index",
-                                    "slow_page_fallback",
-                                    f"{target} {label}: one CDX page failed repeatedly; switching the saved window to smaller resume-key work.",
-                                    retryable=True,
-                                )
-                                save_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
-                            emit(callback, ProgressEvent("index", f"One CDX page remained slow for {target} {label}; successful pages were kept and the remaining range was converted to smaller resumable windows.", completed_windows, total_windows))
-                            continue
                         if not successes and _is_pagination_unavailable(failure_exc):
                             current.pagination_supported = False
                             current.strategy = "resume"
@@ -856,13 +925,42 @@ def index_archive(
                         permanent = next((item.error for item in failures if item.error and _is_permanent_page_error(item.error)), None)
                         if permanent is not None:
                             raise permanent
+                        highest_page_failures = max(current.page_failures.values(), default=0)
+                        new_pages_remain = current.page < current.page_count
+                        if highest_page_failures >= PAGED_PAGE_FAILURE_LIMIT and (
+                            not successes or not new_pages_remain
+                        ):
+                            # Keep the exact failed page numbers. Converting a
+                            # nearly completed Timemap year into broad resume-key
+                            # windows repeated successful work and was the main
+                            # source of post-v1.0.5 indexing stalls.
+                            with database:
+                                error_id = record_error(
+                                    database,
+                                    "index",
+                                    "timemap_pages_unavailable",
+                                    f"{target} {label}: {len(current.retry_pages)} Timemap page(s) remained unavailable "
+                                    f"after {highest_page_failures} attempts: {failure_exc}",
+                                    retryable=True,
+                                )
+                                record_recovery_event(
+                                    database,
+                                    "index",
+                                    "timemap_page_queue_saved",
+                                    f"{target} {label}: saved only the failed Timemap pages for Resume.",
+                                    details={"pages": current.retry_pages[:100], "attempts": highest_page_failures},
+                                )
+                                save_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
+                            raise ConnectivityPaused(
+                                f"{len(current.retry_pages)} Timemap page(s) remained unavailable after "
+                                f"{highest_page_failures} attempts. Successful pages were preserved and only the exact "
+                                "failed page queue was saved for Resume."
+                            ) from failure_exc
                         with database:
-                            error_id = record_error(
-                                database,
-                                "index",
-                                "transient_page_retry",
+                            record_recovery_event(
+                                database, "index", "transient_page_retry",
                                 f"{target} {label}: {len(failures)} CDX page(s) requeued: {failure_exc}",
-                                retryable=True,
+                                details={"pages": [item.page for item in failures]},
                             )
                             _record_network_event(
                                 database,
@@ -873,6 +971,17 @@ def index_archive(
                             save_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
                         if successes:
                             emit(callback, ProgressEvent("index", f"Requeued {len(failures)} slow page(s) while continuing with untouched pages.", completed_windows, total_windows))
+                            continue
+                        if completed_pages and not new_pages_remain:
+                            emit(
+                                callback,
+                                ProgressEvent(
+                                    "index",
+                                    f"Retrying {len(current.retry_pages)} isolated Timemap page(s); all successful pages remain checkpointed.",
+                                    completed_windows,
+                                    total_windows,
+                                ),
+                            )
                             continue
                         error_id = _defer_transient_window(
                             target_config, database, plan, current, target_id, year, signature, seen, error_id,
@@ -929,13 +1038,16 @@ def index_archive(
                         current.failures += 1
                         network = target_config.network.normalized()
                         with database:
-                            error_id = record_error(
-                                database,
-                                "index",
-                                "wayback_connection_unavailable",
-                                f"{target} {label}: {exc}",
-                                retryable=True,
-                            )
+                            if connection_failure_streak >= network.connection_failure_pause_threshold:
+                                error_id = record_error(
+                                    database, "index", "wayback_connection_unavailable",
+                                    f"{target} {label}: {exc}", retryable=True,
+                                )
+                            else:
+                                record_recovery_event(
+                                    database, "index", "connection_retry", f"{target} {label}: {exc}",
+                                    details={"streak": connection_failure_streak},
+                                )
                             _record_network_event(
                                 database,
                                 "connection",

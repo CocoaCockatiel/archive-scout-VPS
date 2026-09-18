@@ -13,7 +13,7 @@ from .analysis.workflow import run_analysis
 from .config import KeywordSetConfig, ProjectConfig, save_project_config
 from .database.connection import open_database
 from .database.repositories import (finish_scan_run, get_or_create_keyword_set, latest_scan_run, start_scan_run, start_operation_run, finish_operation_run, update_operation_run)
-from .downloads.downloader import download_archive
+from .downloads.downloader import download_archive, download_archive_only
 from .downloads.retry import retry_error_urls
 from .events import ConnectivityPaused, ProgressEvent, Stopped
 from .media.downloader import download_media, retry_media_errors
@@ -21,6 +21,7 @@ from .media.indexer import index_external_embedded_media, index_media
 from .media.reports import generate_media_reports
 from .projects.integrity import check_project_integrity
 from .projects.backups import create_project_backup
+from .projects.compaction import compact_project_storage
 from .projects.repair import repair_project
 from .projects.diagnostics import export_diagnostics
 from .projects.importers import import_text_folder
@@ -30,12 +31,13 @@ from .reports.text import generate_index_reports, generate_reports
 from .research.index import build_research_index
 from .scanning.jobs import ScanJob
 from .scanning.rescanner import rescan_keyword_sets
+from .scanning.hitlist import load_hitlist, search_with_hitlist
 
 SUPPORTED_MODES = {
-    "all", "external_media_after_scan", "index", "download", "resume", "rescan", "retry_errors", "report", "integrity",
+    "all", "external_media_after_scan", "index", "download_only", "download", "resume", "rescan", "retry_errors", "report", "integrity",
     "repair", "backup", "diagnostics", "import_folder",
     "media_all", "media_index", "media_download", "media_retry",
-    "analysis", "research_index", "forum_rebuild", "merge_project",
+    "analysis", "research_index", "forum_rebuild", "merge_project", "hitlist", "compact",
 }
 
 
@@ -64,14 +66,25 @@ def prepare_scan_jobs(
         if keyword_set_id in seen_keyword_set_ids:
             continue
         seen_keyword_set_ids.add(keyword_set_id)
-        run_id = start_scan_run(
-            database,
-            keyword_set_id,
-            f"{keyword_set.name} ({mode})",
-            config.minimum_score,
-            mode,
-            {"keyword_set": keyword_set.name, "rules": keyword_set.rules},
-        )
+        compatible_sources = (mode,) if mode not in {"resume", "download", "all"} else ("all", "download", "resume")
+        placeholders = ",".join("?" for _ in compatible_sources)
+        existing = database.execute(
+            f"""SELECT id FROM scan_runs WHERE keyword_set_id=? AND status='interrupted'
+                AND minimum_score=? AND source_operation IN ({placeholders}) ORDER BY id DESC LIMIT 1""",
+            (keyword_set_id, config.minimum_score, *compatible_sources),
+        ).fetchone()
+        if existing:
+            run_id = int(existing["id"])
+            database.execute(
+                "UPDATE scan_runs SET status='running',completed_at=NULL,name=? WHERE id=?",
+                (f"{keyword_set.name} ({mode})", run_id),
+            )
+        else:
+            run_id = start_scan_run(
+                database, keyword_set_id, f"{keyword_set.name} ({mode})",
+                config.minimum_score, mode,
+                {"keyword_set": keyword_set.name, "rules": keyword_set.rules},
+            )
         jobs.append(ScanJob.create(run_id, keyword_set.name, keyword_set.rules))
     database.commit()
     return jobs
@@ -92,6 +105,24 @@ def generate_job_reports(config: ProjectConfig, database: sqlite3.Connection, jo
     return paths
 
 
+def _secondary_media_config(config: ProjectConfig) -> ProjectConfig:
+    """Return media CDX settings without mutating the primary text query.
+
+    Media acquired as a follow-up to a text/download-only run defaults to one
+    archived timestamp per URL. The default ``earliest`` policy therefore uses
+    ``collapse=urlkey`` regardless of the text query's collapse settings. If the
+    user explicitly selects ``latest`` or ``all``, the automatic URL-key collapse
+    is removed for the media query so that policy can actually take effect.
+    Dedicated media-only operations keep their normal CDX settings unchanged.
+    """
+    normalized = config.normalized()
+    if normalized.media.snapshot_strategy == "earliest":
+        collapses = ["urlkey"]
+    else:
+        collapses = [value for value in normalized.cdx_collapses if value != "urlkey"]
+    return replace(normalized, cdx_collapses=collapses).normalized()
+
+
 def run_project(
     config: ProjectConfig,
     mode: str = "all",
@@ -110,7 +141,7 @@ def run_project(
         raise ValueError(f"unsupported mode: {mode}")
     if config.from_date > config.to_date:
         raise ValueError("start date must not be later than end date")
-    if mode in {"all", "external_media_after_scan", "index"} and not config.targets:
+    if mode in {"all", "external_media_after_scan", "index", "download_only"} and not config.targets:
         raise ValueError("at least one target is required")
     if mode.startswith("media_") and not (config.media.targets or config.targets):
         raise ValueError("at least one media target or site target is required")
@@ -130,6 +161,7 @@ def run_project(
     owner_thread_id = threading.get_ident()
     last_progress_write = 0.0
     last_progress_stage = ""
+    progress_persist_interval = 5.0 if mode == "download_only" else 0.75
 
     def operation_callback(event: ProgressEvent) -> None:
         nonlocal last_progress_write, last_progress_stage
@@ -145,7 +177,7 @@ def run_project(
             # UI/bot callbacks still receive every event immediately. Persisted
             # operation progress is rate-limited so a fast download/scan no longer
             # forces a full SQLite commit for every single completed item.
-            should_write = stage_changed or completed_boundary or now - last_progress_write >= 0.75
+            should_write = stage_changed or completed_boundary or now - last_progress_write >= progress_persist_interval
             if should_write:
                 update_operation_run(
                     database,
@@ -165,13 +197,13 @@ def run_project(
     try:
         save_project_config(config)
         if mode == "backup":
-            path = create_project_backup(config.output_dir, reason="manual", keep=config.backup_keep)
+            path = create_project_backup(config.output_dir, reason="manual", keep=config.backup_keep, max_mb=config.backup_max_mb)
             emit(callback, ProgressEvent("backup", f"Backup written to {path}"))
             finish_operation_run(database, operation_run_id, "complete", str(path))
             database.commit()
             return {"backup": path}
         if mode == "repair":
-            path = repair_project(config.output_dir, database, callback, keep_backups=config.backup_keep)
+            path = repair_project(config.output_dir, database, callback, keep_backups=config.backup_keep, backup_max_mb=config.backup_max_mb)
             finish_operation_run(database, operation_run_id, "complete", str(path))
             database.commit()
             return {"repair": path}
@@ -185,13 +217,45 @@ def run_project(
             if not source.is_dir():
                 raise ValueError("choose an existing folder to import")
             if config.auto_backup and (config.output_dir / "archive_scout.sqlite3").exists():
-                create_project_backup(config.output_dir, reason="before_import", keep=config.backup_keep)
+                create_project_backup(config.output_dir, reason="before_import", keep=config.backup_keep, max_mb=config.backup_max_mb)
             imported = import_text_folder(config.output_dir, source, database, stop_event, callback)
             report = config.output_dir / "reports" / "import_summary.txt"
             report.write_text(f"Archive Scout import\n\nSource: {source}\nImported: {imported}\n", encoding="utf-8")
             finish_operation_run(database, operation_run_id, "complete", f"Imported {imported}")
             database.commit()
             return {"import_summary": report}
+        if mode == "hitlist":
+            keywords = load_hitlist(config.hitlist_keywords, config.hitlist_file)
+            if not keywords:
+                # A selected keyword set is a convenient fallback for users who
+                # want a quick literal check without duplicating their hitlist.
+                selected = config.selected_keyword_sets()
+                if selected:
+                    from .scanning.keywords import parse_keyword_rules
+                    values: list[str] = []
+                    for keyword_set in selected:
+                        for rule in parse_keyword_rules(keyword_set.rules):
+                            if (not rule.regex and not rule.case_sensitive and not rule.whole_word
+                                    and not rule.excluded and str(rule.expression).strip()):
+                                values.append(str(rule.expression))
+                    keywords = load_hitlist(values)
+            if not keywords:
+                raise ValueError("enter at least one literal keyword or choose a hitlist file")
+            result = search_with_hitlist(config.output_dir, database, keywords, stop_event, callback)
+            finish_operation_run(database, operation_run_id, "complete", f"Hitlist search complete: {result['matches']} matching captures")
+            database.commit()
+            return {"hitlist_csv": Path(result["csv"]), "hitlist_summary": Path(result["summary"])}
+        if mode == "compact":
+            result = compact_project_storage(config.output_dir, database, stop_event, callback)
+            report = config.output_dir / "reports" / "storage_compaction.txt"
+            report.write_text(
+                "Archive Scout storage compaction\n\n" +
+                "\n".join(f"{key}: {value}" for key, value in sorted(result.items())) + "\n",
+                encoding="utf-8",
+            )
+            finish_operation_run(database, operation_run_id, "complete", str(report))
+            database.commit()
+            return {"storage_compaction": report}
         if mode == "integrity":
             path = check_project_integrity(config.output_dir, database, callback)
             emit(callback, ProgressEvent("integrity", f"Integrity report written to {path}"))
@@ -221,13 +285,50 @@ def run_project(
             if not str(source).strip() or not source.exists():
                 raise ValueError("choose an existing Archive Scout project folder to merge")
             if config.auto_backup and (config.output_dir / "archive_scout.sqlite3").exists():
-                create_project_backup(config.output_dir, reason="before_merge", keep=config.backup_keep)
+                create_project_backup(config.output_dir, reason="before_merge", keep=config.backup_keep, max_mb=config.backup_max_mb)
             summary = merge_projects(config.output_dir, source, database, stop_event, callback)
             merge_report = config.output_dir / "reports" / "merge_summary.txt"
             merge_report.write_text("Archive Scout project merge\n\n" + "\n".join(f"{key}: {value}" for key, value in summary.items()) + "\n", encoding="utf-8")
             finish_operation_run(database, operation_run_id, "complete", str(merge_report))
             database.commit()
             return {"merge_summary": merge_report}
+        if mode == "download_only":
+            # Keep SQLite as a lightweight durable manifest/resume queue. No
+            # scan/document/match/research work is created here. Optional media
+            # acquisition uses the same Media-page settings as a full text run,
+            # but never creates scan jobs merely to discover embedded media.
+            acquisition_config = replace(config, download_scope="all_text")
+            index_archive(acquisition_config, database, stop_event, callback)
+            stats = download_archive_only(
+                acquisition_config, database, stop_event, callback, states=("pending",)
+            )
+            paths: dict[str, Path] = {"project": config.output_dir / "project.json"}
+            if config.media.enabled:
+                media_config = _secondary_media_config(config)
+                emit(
+                    callback,
+                    ProgressEvent(
+                        "media_index",
+                        "Text acquisition is complete. Indexing optional media with a single archived timestamp per URL by default…",
+                    ),
+                )
+                index_media(media_config, database, stop_event, callback)
+                download_media(media_config, database, stop_event, callback)
+                paths.update(generate_media_reports(media_config, database))
+            emit(
+                callback,
+                ProgressEvent(
+                    "download_only",
+                    f"Download-only acquisition complete: {int(stats['downloaded']):,} saved; "
+                    f"{int(stats['skipped']):,} non-text skipped; {int(stats['errors']):,} errors. "
+                    "Run Search with Hitlist when ready.",
+                    int(stats["queued"]), int(stats["queued"]),
+                    {"downloaded": int(stats["downloaded"]), "scan_workers": 0},
+                ),
+            )
+            finish_operation_run(database, operation_run_id, "complete", "Download-only acquisition complete")
+            database.commit()
+            return paths
         if mode == "index":
             index_archive(config, database, stop_event, callback)
             paths = generate_index_reports(config, database)
@@ -284,7 +385,7 @@ def run_project(
         elif mode in {"download", "resume"}:
             download_archive(config, database, primary_run_id, stop_event, callback, states=("pending",), scan_jobs=jobs)
         elif mode == "rescan":
-            rescan_keyword_sets(database, jobs, stop_event, callback, workers=config.workers)
+            rescan_keyword_sets(database, jobs, stop_event, callback, workers=(config.scan_workers or None), report_config=config.report)
         elif mode == "retry_errors":
             retry_error_urls(config, database, primary_run_id, stop_event, callback, jobs)
             media_error_count = database.execute(
@@ -304,6 +405,7 @@ def run_project(
         if mode == "retry_errors" and database.execute("SELECT COUNT(*) FROM media_captures").fetchone()[0]:
             paths.update(generate_media_reports(config, database))
         if mode == "external_media_after_scan":
+            media_config = _secondary_media_config(config)
             emit(
                 callback,
                 ProgressEvent(
@@ -311,7 +413,7 @@ def run_project(
                     "Text scanning is complete. Discovering external images/videos in saved pages and resolving their Wayback captures…",
                 ),
             )
-            media_signature = index_external_embedded_media(config, database, stop_event, callback)
+            media_signature = index_external_embedded_media(media_config, database, stop_event, callback)
             media_total = int(database.execute(
                 "SELECT COUNT(*) FROM media_captures WHERE query_signature=?", (media_signature,)
             ).fetchone()[0])
@@ -328,12 +430,13 @@ def run_project(
                     pending_media,
                 ),
             )
-            download_media(config, database, stop_event, callback)
-            paths.update(generate_media_reports(config, database))
+            download_media(media_config, database, stop_event, callback)
+            paths.update(generate_media_reports(media_config, database))
         elif mode == "all" and config.media.enabled:
-            index_media(config, database, stop_event, callback)
-            download_media(config, database, stop_event, callback)
-            paths.update(generate_media_reports(config, database))
+            media_config = _secondary_media_config(config)
+            index_media(media_config, database, stop_event, callback)
+            download_media(media_config, database, stop_event, callback)
+            paths.update(generate_media_reports(media_config, database))
         if config.research.enabled and config.research.auto_build:
             research_summary = build_research_index(config, database, stop_event, callback)
             research_report = config.output_dir / "reports" / "research_index.json"
@@ -347,6 +450,7 @@ def run_project(
     except ConnectivityPaused as exc:
         with database:
             database.execute("UPDATE captures SET state='pending' WHERE state='downloading'")
+            database.execute("UPDATE captures SET state='downloaded_unscanned' WHERE state='scanning'")
             database.execute("UPDATE media_captures SET state='pending' WHERE state='downloading'")
             finish_jobs(database, jobs, "interrupted")
         finish_operation_run(database, operation_run_id, "paused", str(exc))
@@ -356,6 +460,7 @@ def run_project(
     except RateLimitDeferred as exc:
         with database:
             database.execute("UPDATE captures SET state='pending' WHERE state='downloading'")
+            database.execute("UPDATE captures SET state='downloaded_unscanned' WHERE state='scanning'")
             database.execute("UPDATE media_captures SET state='pending' WHERE state='downloading'")
             finish_jobs(database, jobs, "interrupted")
         finish_operation_run(database, operation_run_id, "interrupted", str(exc))
@@ -371,6 +476,7 @@ def run_project(
     except Stopped:
         with database:
             database.execute("UPDATE captures SET state='pending' WHERE state='downloading'")
+            database.execute("UPDATE captures SET state='downloaded_unscanned' WHERE state='scanning'")
             database.execute("UPDATE media_captures SET state='pending' WHERE state='downloading'")
             finish_jobs(database, jobs, "interrupted")
         finish_operation_run(database, operation_run_id, "interrupted", "Stopped by user")
@@ -383,6 +489,7 @@ def run_project(
         # before the project is reopened and crash-recovery runs.
         with database:
             database.execute("UPDATE captures SET state='pending' WHERE state='downloading'")
+            database.execute("UPDATE captures SET state='downloaded_unscanned' WHERE state='scanning'")
             database.execute("UPDATE media_captures SET state='pending' WHERE state='downloading'")
             if jobs:
                 finish_jobs(database, jobs, "failed")
@@ -390,4 +497,11 @@ def run_project(
         database.commit()
         raise
     finally:
+        # Once worker pools have drained, checkpoint WAL so a clean Pause & Save
+        # or normal shutdown has a small, self-contained durable database.
+        try:
+            database.commit()
+            database.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error:
+            pass
         database.close()

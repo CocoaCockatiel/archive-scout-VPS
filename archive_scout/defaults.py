@@ -1,21 +1,46 @@
 from __future__ import annotations
 
 PRESETS = {
-    "Ogrish 9/11 research": {
-        "targets": ["ogrishforum.com/*", "forum.ogrish.com/*"],
+    "General web archive research": {
+        "targets": [],
         "keywords": [
-            "9/11", "9-11", "September 11", "Sept 11", "World Trade Center", "WTC",
-            "Twin Towers", "North Tower", "South Tower", "Ground Zero", "Flight 11",
-            "Flight 175", "Flight 77", "Flight 93", "Pentagon", "Shanksville", "jumper",
-            "jumpers", "falling man", "falling bodies", "LOL Superman", "lolsuperman",
-            "skylight.mov", "skylight", "carport", "glass canopy", "plaza footage",
-            "lobby footage", "impact footage", "rare footage", "unseen footage", "Naudet",
-            "Rosbrook", "Windows on the World", "Cantor Fitzgerald"
+            "archive", "mirror", "download", "attachment", "video", "image",
+            "filename", "reupload", "backup", "snapshot",
         ],
-        "from_year": 2001,
-        "to_year": 2010,
-        "from_date": "2001",
-        "to_date": "2010",
+        "from_year": 2000,
+        "to_year": 2020,
+        "from_date": "2000",
+        "to_date": "2020",
+        "cdx_filters": ["statuscode:200"],
+        "cdx_collapses": ["urlkey"],
+        "cdx_match_type": "",
+        "cdx_extra_params": [],
+    },
+    "Legacy forum research": {
+        "targets": [],
+        "keywords": [
+            "thread", "post", "reply", "attachment", "download", "mirror",
+            "video", "image", "uploaded", "reupload",
+        ],
+        "from_year": 1998,
+        "to_year": 2015,
+        "from_date": "1998",
+        "to_date": "2015",
+        "cdx_filters": ["statuscode:200"],
+        "cdx_collapses": ["urlkey"],
+        "cdx_match_type": "",
+        "cdx_extra_params": [],
+    },
+    "Lost media discovery": {
+        "targets": [],
+        "keywords": [
+            "lost media", "rare footage", "unseen footage", "mirror", "reupload",
+            "filename", "download", "video", "clip", "archive",
+        ],
+        "from_year": 1996,
+        "to_year": 2020,
+        "from_date": "1996",
+        "to_date": "2020",
         "cdx_filters": ["statuscode:200"],
         "cdx_collapses": ["urlkey"],
         "cdx_match_type": "",

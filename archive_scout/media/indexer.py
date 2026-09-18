@@ -16,7 +16,9 @@ from ..cdx.client import CDXRow, HttpClient, PermanentRequestError, RateLimitDef
 from ..cdx.indexer import (
     PendingWindow,
     PagedBatch,
+    PAGED_PAGE_FAILURE_LIMIT,
     PAGED_PIPELINE_PAGES,
+    _request_paged_count,
     _select_page_batch,
     cdx_response_budget,
     decode_plan,
@@ -33,7 +35,6 @@ from ..cdx.parameters import (
     cdx_query_signatures,
     cdx_target_value,
     cdx_year_window,
-    parse_num_pages,
     preferred_index_strategy,
 )
 from ..config import ProjectConfig
@@ -47,6 +48,7 @@ from ..database.repositories import (
     media_discovery_counts,
     queue_media_discovery_candidates,
     record_error,
+    record_recovery_event,
     record_site_issue,
     upsert_media_captures,
 )
@@ -162,10 +164,16 @@ def build_media_num_pages_params(
     page_blocks: int,
 ):
     params = build_media_params(config, pattern, start, end, extensions=extensions)
-    params = [(key, value) for key, value in params if key not in {"limit", "showResumeKey", "resumeKey"}]
+    params = [
+        (key, value)
+        for key, value in params
+        if key not in {"limit", "showResumeKey", "resumeKey", "fl"}
+    ]
     params.append(("showNumPages", "true"))
-    if int(page_blocks) > 0:
-        params.append(("pageSize", str(int(page_blocks))))
+    blocks = int(page_blocks)
+    if blocks <= 0:
+        blocks = 9
+    params.append(("pageSize", str(blocks)))
     return params
 
 
@@ -180,9 +188,15 @@ def build_media_paged_params(
 ):
     params = build_media_params(config, pattern, start, end, extensions=extensions)
     params = [(key, value) for key, value in params if key not in {"limit", "showResumeKey", "resumeKey"}]
+    params = [
+        (key, "timestamp,original,mimetype,statuscode,digest,length") if key == "fl" else (key, value)
+        for key, value in params
+    ]
     params.append(("page", str(max(0, page))))
-    if int(page_blocks) > 0:
-        params.append(("pageSize", str(int(page_blocks))))
+    blocks = int(page_blocks)
+    if blocks <= 0:
+        blocks = 9
+    params.append(("pageSize", str(blocks)))
     return params
 
 
@@ -386,27 +400,37 @@ def _defer_media_window(
 ) -> int:
     current.failures += 1
     if current.strategy == "paged":
-        # Keep server-selected paging (page_blocks=0) server-selected. Turning
-        # an automatic page into pageSize=1 recreates the thousands-of-pages
-        # failure mode this release is intended to eliminate.
+        # Keep server-selected paging server-selected. Turning an automatic
+        # page into pageSize=1 recreates the thousands-of-pages failure mode.
         if current.page_blocks > 1:
             current.page_blocks = max(1, current.page_blocks // 2)
     else:
         current.page_size = max(25, (current.page_size or config.page_size) // 2)
     with database:
-        error_id = record_error(
+        record_recovery_event(
             database,
             "media_index",
             "transient_media_index_delay",
             f"{target} {label}: {type(exc).__name__}: {exc}",
-            retryable=True,
+            details={"failures": current.failures, "strategy": current.strategy},
         )
         if len(plan.pending) > 1:
             plan.pending.append(plan.pending.pop(0))
         _save_media_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
     network = config.network.normalized()
     threshold = network.failure_pause_threshold
+
+    def pause_error(message: str) -> int:
+        with database:
+            new_error = record_error(
+                database, "media_index", "transient_media_index_delay",
+                f"{target} {label}: {message}", retryable=True,
+            )
+            _save_media_state(database, target_id, year, signature, encode_plan(plan), False, seen, new_error)
+        return new_error
+
     if plan.pending and all(item.failures >= threshold for item in plan.pending):
+        error_id = pause_error(f"all remaining media index windows reached the retry threshold: {exc}")
         raise ConnectivityPaused(
             "Wayback could not answer any remaining combined-media index window. "
             "The exact media queue was saved and can be continued with Resume."
@@ -416,8 +440,10 @@ def _defer_media_window(
             callback(ProgressEvent("media_index", "Deferred one unresponsive combined-media window behind the remaining queue; it will retry automatically.", completed, total))
         return error_id
     if not network.persistent_retries and current.failures >= max(3, config.retries):
+        error_id = pause_error(f"media indexing retry limit reached: {exc}")
         raise ConnectivityPaused(f"media indexing retry limit reached; progress was saved: {exc}") from exc
     if current.failures >= threshold:
+        error_id = pause_error(f"media index window remained unreachable after {current.failures} recovery cycles: {exc}")
         raise ConnectivityPaused(
             f"Wayback remained unreachable for this media window after {current.failures} recovery cycles. Progress was saved."
         ) from exc
@@ -466,17 +492,18 @@ def _request_media_paged_batch(
     extensions: list[str],
     stop_event: threading.Event,
     consume_success: Callable[[PageFetchResult], None] | None = None,
+    completed_pages: set[int] | None = None,
 ) -> PagedBatch:
     endpoints = cdx_paged_endpoints(config)
     network = config.network.normalized()
     if current.page_count < 0:
-        payload = client.get_cdx_any(
+        current.page_count = _request_paged_count(
+            client,
             endpoints,
             build_media_num_pages_params(config, target, current.start, current.end, extensions, current.page_blocks),
-            max_bytes=1024 * 1024,
-            prefer_text=False,
+            config,
+            stop_event,
         )
-        current.page_count = parse_num_pages(payload)
         current.page = min(current.page, current.page_count)
         current.retry_pages = [page for page in current.retry_pages if page < current.page_count]
     if current.page >= current.page_count and not current.retry_pages:
@@ -484,13 +511,17 @@ def _request_media_paged_batch(
 
     page_workers = effective_page_workers(network.cdx_workers, current.page_blocks)
     pages, next_page = _select_page_batch(current, max(page_workers, PAGED_PIPELINE_PAGES))
-    if not pages:
-        return PagedBatch([], [], True)
+    completed_pages = completed_pages or set()
+    requested_pages = [page for page in pages if page not in completed_pages]
+    if not requested_pages:
+        current.page = next_page
+        current.retry_pages = [page for page in current.retry_pages if page not in completed_pages]
+        return PagedBatch([], pages, current.page >= current.page_count and not current.retry_pages)
     results: list[PageFetchResult] = []
     for result in iter_cdx_pages(
         client,
         endpoints,
-        pages,
+        requested_pages,
         lambda page: build_media_paged_params(
             config, target, current.start, current.end, extensions, page, current.page_blocks
         ),
@@ -498,6 +529,7 @@ def _request_media_paged_batch(
         workers=page_workers,
         max_bytes=(192 * 1024 * 1024 if current.page_blocks <= 0 else max(64 * 1024 * 1024, current.page_blocks * 12 * 1024 * 1024)),
         prefer_text=False,
+        json_only=True,
     ):
         if result.succeeded and consume_success is not None:
             consume_success(result)
@@ -683,23 +715,57 @@ def index_direct_media(
                     accepted_count = 0
                     changed = 0
                     write_seconds = 0.0
+                    batch_pages_done = 0
+                    last_page_progress = time.monotonic()
+
+                    completed_pages = {
+                        int(row[0]) for row in database.execute(
+                            """SELECT page FROM media_index_pages WHERE query_signature=? AND target_id=? AND extension=?
+                               AND window_start=? AND window_end=? AND status='complete'""",
+                            (state_signature, target_id, ALL_EXTENSIONS_STATE, current.start, current.end),
+                        )
+                    }
 
                     def store_completed_media_page(result: PageFetchResult) -> None:
-                        nonlocal received, accepted_count, changed, write_seconds
+                        nonlocal received, accepted_count, changed, write_seconds, batch_pages_done, last_page_progress
                         page_received = len(result.rows)
                         accepted = _accept_media_rows(result.rows, media)
                         write_started = time.monotonic()
                         with database:
                             changed += upsert_media_captures(database, accepted, target_id, signature)
+                            database.execute(
+                                """INSERT INTO media_index_pages(query_signature,target_id,extension,window_start,window_end,page,row_count,status,updated_at)
+                                   VALUES(?,?,?,?,?,?,?,'complete',?)
+                                   ON CONFLICT(query_signature,target_id,extension,window_start,window_end,page) DO UPDATE SET
+                                   row_count=excluded.row_count,status='complete',updated_at=excluded.updated_at""",
+                                (state_signature, target_id, ALL_EXTENSIONS_STATE, current.start, current.end, int(result.page), page_received, utc_now()),
+                            )
+                        completed_pages.add(int(result.page))
                         write_seconds += time.monotonic() - write_started
                         received += page_received
                         accepted_count += len(accepted)
+                        batch_pages_done += 1
+                        now = time.monotonic()
+                        if callback and (
+                            now - last_page_progress >= 1.0
+                            or len(completed_pages) >= current.page_count
+                        ):
+                            callback(
+                                ProgressEvent(
+                                    "media_index",
+                                    f"{target} {label}: completed {len(completed_pages):,}/{current.page_count:,} Timemap pages; "
+                                    f"this block finished {batch_pages_done:,} pages and accepted {accepted_count:,} media captures",
+                                    completed,
+                                    total,
+                                )
+                            )
+                            last_page_progress = now
                         result.rows.clear()
                         accepted.clear()
 
                     batch = _request_media_paged_batch(
                         target_config, client, target, current, extensions, stop_event,
-                        store_completed_media_page,
+                        store_completed_media_page, completed_pages,
                     )
                     request_seconds = max(0.0, time.monotonic() - request_started - write_seconds)
                     successes = batch.successful
@@ -746,37 +812,6 @@ def index_direct_media(
                         for item in failures
                     ):
                         raise failure_exc
-                    if max(current.page_failures.values(), default=0) >= 2:
-                        current.strategy = "resume"
-                        current.pagination_supported = False
-                        current.page = 0
-                        current.page_count = -1
-                        current.resume_key = None
-                        current.retry_pages.clear()
-                        current.page_failures.clear()
-                        current.failures = 0
-                        current.page_size = max(100, target_config.page_size // 2)
-                        parts = split_window(current)
-                        if parts:
-                            for part in parts:
-                                part.strategy = "resume"
-                                part.pagination_supported = False
-                            plan.pending[0:1] = parts
-                            added = len(parts) - 1
-                            plan.planned += added
-                            total += added
-                        with database:
-                            error_id = record_error(
-                                database,
-                                "media_index",
-                                "slow_media_page_fallback",
-                                f"{target} {label}: one combined-media CDX page failed repeatedly; switching the saved window to smaller resume-key work.",
-                                retryable=True,
-                            )
-                            _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
-                        if callback:
-                            callback(ProgressEvent("media_index", f"One combined-media CDX page remained slow for {target} {label}; successful pages were kept and the remaining range was converted to smaller resumable windows.", completed, total))
-                        continue
                     if not successes and _pagination_unavailable(failure_exc):
                         current.pagination_supported = False
                         current.strategy = "resume"
@@ -793,18 +828,59 @@ def index_direct_media(
                     )
                     if permanent is not None:
                         raise permanent
+                    highest_page_failures = max(current.page_failures.values(), default=0)
+                    new_pages_remain = current.page < current.page_count
+                    if highest_page_failures >= PAGED_PAGE_FAILURE_LIMIT and (
+                        not successes or not new_pages_remain
+                    ):
+                        with database:
+                            error_id = record_error(
+                                database,
+                                "media_index",
+                                "timemap_media_pages_unavailable",
+                                f"{target} {label}: {len(current.retry_pages)} Timemap media page(s) remained unavailable "
+                                f"after {highest_page_failures} attempts: {failure_exc}",
+                                retryable=True,
+                            )
+                            record_recovery_event(
+                                database,
+                                "media_index",
+                                "timemap_media_page_queue_saved",
+                                f"{target} {label}: saved only the failed Timemap media pages for Resume.",
+                                details={"pages": current.retry_pages[:100], "attempts": highest_page_failures},
+                            )
+                            _save_media_state(
+                                database, target_id, year, state_signature,
+                                encode_plan(plan), False, seen, error_id,
+                            )
+                        raise ConnectivityPaused(
+                            f"{len(current.retry_pages)} Timemap media page(s) remained unavailable after "
+                            f"{highest_page_failures} attempts. Successful pages were preserved and only the exact "
+                            "failed media-page queue was saved for Resume."
+                        ) from failure_exc
                     with database:
-                        error_id = record_error(
+                        record_recovery_event(
                             database,
                             "media_index",
                             "transient_media_page_retry",
                             f"{target} {label}: {len(failures)} media CDX page(s) requeued: {failure_exc}",
-                            retryable=True,
+                            details={"pages": [item.page for item in failures]},
                         )
                         _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
                     if successes:
                         if callback:
                             callback(ProgressEvent("media_index", f"Requeued {len(failures)} slow media page(s) while continuing with untouched pages.", completed, total))
+                        continue
+                    if completed_pages and not new_pages_remain:
+                        if callback:
+                            callback(
+                                ProgressEvent(
+                                    "media_index",
+                                    f"Retrying {len(current.retry_pages)} isolated Timemap media page(s); all successful pages remain checkpointed.",
+                                    completed,
+                                    total,
+                                )
+                            )
                         continue
                     error_id = _defer_media_window(
                         target_config, database, plan, current, target_id, year, state_signature,
@@ -858,13 +934,17 @@ def index_direct_media(
                     current.failures += 1
                     network = target_config.network.normalized()
                     with database:
-                        error_id = record_error(
-                            database,
-                            "media_index",
-                            "wayback_connection_unavailable",
-                            f"{target} {label}: {exc}",
-                            retryable=True,
-                        )
+                        if connection_failure_streak >= network.connection_failure_pause_threshold:
+                            error_id = record_error(
+                                database, "media_index", "wayback_connection_unavailable",
+                                f"{target} {label}: {exc}", retryable=True,
+                            )
+                        else:
+                            record_recovery_event(
+                                database, "media_index", "connection_retry",
+                                f"{target} {label}: {exc}",
+                                details={"streak": connection_failure_streak},
+                            )
                         _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
                     if connection_failure_streak >= network.connection_failure_pause_threshold:
                         raise ConnectivityPaused(
@@ -1012,9 +1092,11 @@ def _discover_document_media(
     target_host_set: set[str],
     external_only: bool,
     row: dict,
-) -> tuple[int, str, list[tuple[str, int | None, str, str]]]:
-    """Pure local worker used by embedded-media discovery."""
-    document_id = int(row["id"])
+) -> tuple[int, int | None, str, list[tuple[str, int | None, str, str]]]:
+    """Pure local worker used by saved-page embedded-media discovery."""
+    page_id = int(row["id"])
+    source_document_id_value = row.get("source_document_id", row.get("id"))
+    source_document_id = int(source_document_id_value) if source_document_id_value is not None else None
     content_hash = str(row.get("content_hash") or "")
     known_links = [str(value) for value in json_value(row.get("links_json"), []) if str(value).strip()]
     raw = safe_document_text(output_dir, str(row.get("path") or ""), max_file_bytes)
@@ -1031,11 +1113,11 @@ def _discover_document_media(
             continue
         batch.append((
             item.url,
-            document_id,
+            source_document_id,
             "external_embedded" if is_external else "embedded",
             item.kind_hint,
         ))
-    return document_id, content_hash, batch
+    return page_id, source_document_id, content_hash, batch
 
 
 def _discover_embedded_queue(
@@ -1047,7 +1129,7 @@ def _discover_embedded_queue(
     *,
     external_only: bool,
 ) -> int:
-    """Discover media from saved documents with bounded local parallelism.
+    """Discover media from saved pages with bounded local parallelism.
 
     SQLite access remains on the operation thread. File reads and HTML/player
     parsing run in a small worker pool, so large projects no longer serialize
@@ -1061,17 +1143,28 @@ def _discover_embedded_queue(
     # optional direct-media targets must not change that boundary.
     discovery_targets = config.targets if external_only else (media.targets or config.targets)
     targets = target_hosts(discovery_targets)
-    total = int(database.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
+    document_total = int(database.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
+    unscanned_total = int(database.execute(
+        "SELECT COUNT(*) FROM captures WHERE state='downloaded_unscanned' AND local_path IS NOT NULL"
+    ).fetchone()[0])
+    total = document_total + unscanned_total
     scanned = queued = 0
     cursor = database.execute(
         """
-        SELECT d.id,d.path,d.links_json,d.content_hash,c.original_url,
+        SELECT 'document' AS source_kind,d.id,d.id AS source_document_id,
+               d.path,d.links_json,d.content_hash,c.original_url,
                mdd.content_hash AS discovery_content_hash
         FROM documents d
         JOIN captures c ON c.id=d.capture_id
         LEFT JOIN media_discovery_documents mdd
           ON mdd.document_id=d.id AND mdd.query_signature=?
-        ORDER BY d.id
+        UNION ALL
+        SELECT 'capture' AS source_kind,c.id,NULL AS source_document_id,
+               c.local_path AS path,'[]' AS links_json,c.content_hash,c.original_url,
+               NULL AS discovery_content_hash
+        FROM captures c
+        WHERE c.state='downloaded_unscanned' AND c.local_path IS NOT NULL
+        ORDER BY source_kind,id
         """,
         (signature,),
     )
@@ -1086,9 +1179,9 @@ def _discover_embedded_queue(
             for row in rows:
                 if stop_event.is_set():
                     raise Stopped
-                document_id = int(row["id"])
+                source_document_id = row["source_document_id"]
                 content_hash = str(row["content_hash"] or "")
-                if str(row["discovery_content_hash"] or "") == content_hash and content_hash:
+                if source_document_id is not None and str(row["discovery_content_hash"] or "") == content_hash and content_hash:
                     scanned += 1
                     continue
                 futures.append(pool.submit(
@@ -1100,7 +1193,7 @@ def _discover_embedded_queue(
                     external_only,
                     dict(row),
                 ))
-            completed_results: list[tuple[int, str, list[tuple[str, int | None, str, str]]]] = []
+            completed_results: list[tuple[int, int | None, str, list[tuple[str, int | None, str, str]]]] = []
             for future in concurrent.futures.as_completed(futures):
                 if stop_event.is_set():
                     for pending in futures:
@@ -1111,9 +1204,10 @@ def _discover_embedded_queue(
             # transaction boundary per document. Worker threads never touch SQLite.
             if completed_results:
                 with database:
-                    for document_id, content_hash, discovered in completed_results:
+                    for _page_id, source_document_id, content_hash, discovered in completed_results:
                         queued += queue_media_discovery_candidates(database, signature, discovered)
-                        mark_media_discovery_document(database, signature, document_id, content_hash, len(discovered))
+                        if source_document_id is not None:
+                            mark_media_discovery_document(database, signature, source_document_id, content_hash, len(discovered))
                         scanned += 1
             if callback and (scanned == total or scanned % 100 == 0):
                 callback(ProgressEvent(

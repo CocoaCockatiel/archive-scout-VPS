@@ -16,6 +16,7 @@ from ..constants import CDX_URL
 from ..cdx.parameters import cdx_endpoints
 from ..database.repositories import upsert_media_capture
 from ..downloads.rate_limit import SharedFixedRateLimiter, shared_host_gate
+from ..document_store import document_body
 from ..events import ProgressEvent, Stopped
 from ..extraction.provenance import trace_provenance
 from ..extraction.regex import parse_extractor_rules, run_extractors
@@ -203,60 +204,85 @@ def _lookup_external_assets(
 
 
 def _write_reports(config: ProjectConfig, database: sqlite3.Connection, summary: dict) -> dict[str, Path]:
+    report = config.report.normalized()
     folder = config.output_dir / "reports" / "analysis"
     folder.mkdir(parents=True, exist_ok=True)
     paths: dict[str, Path] = {}
 
     summary_path = folder / "analysis_summary.txt"
-    atomic_write_text(summary_path, "Archive Scout archive analysis\n\n" + "\n".join(f"{key}: {value}" for key, value in summary.items()) + "\n")
-    paths["analysis_summary"] = summary_path
+    if report.output_enabled("analysis_summary"):
+        fields = report.fields_for("analysis_summary")
+        lines: list[str] = []
+        for field in fields:
+            if field == "heading":
+                lines.append("Archive Scout archive analysis")
+            elif field in summary:
+                lines.append(f"{field}: {summary[field]}")
+        atomic_write_text(summary_path, "\n".join(lines) + ("\n" if lines else ""))
+        paths["analysis_summary"] = summary_path
+    else:
+        summary_path.unlink(missing_ok=True)
 
     specs = {
-        "forum_threads.tsv": (
-            "canonical_key\tcanonical_url\ttitle\tprofile\tfirst_timestamp\tlast_timestamp\tpost_count\tdocument_count\n",
+        "forum_threads": (
+            "forum_threads.tsv",
+            ("canonical_key", "canonical_url", "title", "profile", "first_timestamp", "last_timestamp", "post_count", "document_count"),
             "SELECT canonical_key,canonical_url,title,profile,first_timestamp,last_timestamp,post_count,document_count FROM forum_threads ORDER BY first_timestamp,canonical_key",
         ),
-        "extractions.tsv": (
-            "document_id\textractor\ttype\tfield\tvalue\tcontext\n",
-            "SELECT document_id,extractor_name,extractor_type,field,value,context FROM extractions ORDER BY extractor_name,value,document_id",
+        "extractions": (
+            "extractions.tsv",
+            ("document_id", "extractor", "type", "field", "value", "context"),
+            "SELECT document_id,extractor_name AS extractor,extractor_type AS type,field,value,context FROM extractions ORDER BY extractor_name,value,document_id",
         ),
-        "legacy_assets.tsv": (
-            "document_id\turl\ttype\tplayer\texternal\tarchive_status\tcontext\n",
-            "SELECT document_id,original_url,asset_type,player,external,archive_status,context FROM legacy_assets ORDER BY original_url,document_id",
+        "legacy_assets": (
+            "legacy_assets.tsv",
+            ("document_id", "url", "type", "player", "external", "archive_status", "context"),
+            "SELECT document_id,original_url AS url,asset_type AS type,player,external,archive_status,context FROM legacy_assets ORDER BY original_url,document_id",
         ),
-        "duplicate_groups.tsv": (
-            "group_id\tmethod\trepresentative_document_id\tdocument_id\tsimilarity\n",
-            "SELECT dg.id,dg.method,dg.representative_document_id,dm.document_id,dm.similarity FROM duplicate_groups dg JOIN duplicate_members dm ON dm.group_id=dg.id ORDER BY dg.id,dm.similarity DESC",
+        "duplicate_groups": (
+            "duplicate_groups.tsv",
+            ("group_id", "method", "representative_document_id", "document_id", "similarity"),
+            "SELECT dg.id AS group_id,dg.method,dg.representative_document_id,dm.document_id,dm.similarity FROM duplicate_groups dg JOIN duplicate_members dm ON dm.group_id=dg.id ORDER BY dg.id,dm.similarity DESC",
         ),
-        "provenance.tsv": (
-            "source_url\tsource_timestamp\tmirror_url\tmirror_timestamp\tmethod\tsimilarity\n",
-            "SELECT cs.original_url,pe.source_timestamp,cm.original_url,pe.mirror_timestamp,pe.method,pe.similarity FROM provenance_edges pe JOIN documents ds ON ds.id=pe.source_document_id JOIN captures cs ON cs.id=ds.capture_id JOIN documents dm ON dm.id=pe.mirror_document_id JOIN captures cm ON cm.id=dm.capture_id ORDER BY pe.source_timestamp,pe.mirror_timestamp",
+        "provenance": (
+            "provenance.tsv",
+            ("source_url", "source_timestamp", "mirror_url", "mirror_timestamp", "method", "similarity"),
+            "SELECT cs.original_url AS source_url,pe.source_timestamp,cm.original_url AS mirror_url,pe.mirror_timestamp,pe.method,pe.similarity FROM provenance_edges pe JOIN documents ds ON ds.id=pe.source_document_id JOIN captures cs ON cs.id=ds.capture_id JOIN documents dm ON dm.id=pe.mirror_document_id JOIN captures cm ON cm.id=dm.capture_id ORDER BY pe.source_timestamp,pe.mirror_timestamp",
         ),
-        "snapshot_diffs.tsv": (
-            "earlier_url\tearlier_timestamp\tlater_timestamp\tsummary_json\n",
-            "SELECT ce.original_url,ce.timestamp,cl.timestamp,sd.summary_json FROM snapshot_diffs sd JOIN captures ce ON ce.id=sd.earlier_capture_id JOIN captures cl ON cl.id=sd.later_capture_id ORDER BY ce.original_url,ce.timestamp",
+        "snapshot_diffs": (
+            "snapshot_diffs.tsv",
+            ("earlier_url", "earlier_timestamp", "later_timestamp", "summary_json"),
+            "SELECT ce.original_url AS earlier_url,ce.timestamp AS earlier_timestamp,cl.timestamp AS later_timestamp,sd.summary_json FROM snapshot_diffs sd JOIN captures ce ON ce.id=sd.earlier_capture_id JOIN captures cl ON cl.id=sd.later_capture_id ORDER BY ce.original_url,ce.timestamp",
         ),
-        "first_appearances.tsv": (
-            "query\toriginal_url\tfirst_timestamp\tlast_timestamp\n",
+        "first_appearances": (
+            "first_appearances.tsv",
+            ("query", "original_url", "first_timestamp", "last_timestamp"),
             "SELECT query,original_url,first_timestamp,last_timestamp FROM first_appearances ORDER BY query,first_timestamp,original_url",
         ),
     }
-    for filename, (header, query) in specs.items():
-        def report_lines(header=header, query=query):
-            yield header.rstrip("\n")
+    for output_name, (filename, _available_fields, query) in specs.items():
+        path = folder / filename
+        if not report.output_enabled(output_name):
+            path.unlink(missing_ok=True)
+            continue
+        fields = report.fields_for(output_name)
+
+        def report_lines(fields=fields, query=query):
+            if not fields:
+                return
+            yield "\t".join(fields)
             for row in database.execute(query):
                 values = [
-                    str(value if value is not None else "")
+                    str(row[field] if row[field] is not None else "")
                     .replace("\t", " ")
                     .replace("\r", " ")
                     .replace("\n", " ")
-                    for value in row
+                    for field in fields
                 ]
                 yield "\t".join(values)
 
-        path = folder / filename
         atomic_write_lines(path, report_lines())
-        paths[filename.rsplit(".", 1)[0]] = path
+        paths[output_name] = path
     return paths
 
 
@@ -302,8 +328,7 @@ def run_analysis(
                 database.execute("DELETE FROM legacy_assets")
         rows = database.execute(
             """
-            SELECT d.id AS document_id,d.path,d.title,d.body_text,d.links_json,
-                   c.id AS capture_id,c.original_url,c.timestamp
+            SELECT d.*,d.id AS document_id,c.id AS capture_id,c.original_url,c.timestamp
             FROM documents d JOIN captures c ON c.id=d.capture_id
             ORDER BY d.id
             """
@@ -360,7 +385,7 @@ def run_analysis(
                 links = json_value(row["links_json"], [])
                 fields = {
                     "title": str(row["title"] or ""),
-                    "body": str(row["body_text"] or ""),
+                    "body": document_body(row),
                     "url": original_url,
                     "source": raw,
                     "links": "\n".join(str(value) for value in links),

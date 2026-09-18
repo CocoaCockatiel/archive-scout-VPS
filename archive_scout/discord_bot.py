@@ -16,7 +16,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from .config import KeywordSetConfig, ProjectConfig, save_project_config
+from .config import KeywordSetConfig, ProjectConfig, load_project_config, save_project_config
 from .events import ProgressEvent, Stopped
 from .operations import SUPPORTED_MODES, run_project
 from .reports.text import generate_all_matches_reports
@@ -85,6 +85,9 @@ def ensure_all_matches_report(project_dir: Path, report_name: str) -> Path:
     """Backfill combined reports for projects completed before they were introduced."""
     if report_name not in COMBINED_REPORT_NAMES:
         raise ValueError("Unknown combined report format")
+    report_config = load_project_config(project_dir / "project.json").report
+    if not report_config.output_enabled("matches_ranked"):
+        raise ValueError("Ranked match reports are disabled in this project's report settings")
     path = project_dir / "reports" / report_name
     if path.is_file() and path.stat().st_size:
         return path
@@ -96,7 +99,7 @@ def ensure_all_matches_report(project_dir: Path, report_name: str) -> Path:
     try:
         database.execute("PRAGMA query_only=ON")
         database.execute("PRAGMA busy_timeout=10000")
-        reports = generate_all_matches_reports(project_dir, database)
+        reports = generate_all_matches_reports(project_dir, database, report_config)
         return next(report for report in reports.values() if report.name == report_name)
     finally:
         database.close()
@@ -578,7 +581,7 @@ class ScoutCog(commands.Cog):
             project_dir = safe_project_dir(self.bot.settings.projects_root, project)
             reports_dir = (project_dir / "reports").resolve()
             path = (reports_dir / report).resolve()
-            if report in COMBINED_REPORT_NAMES and (not path.is_file() or not path.stat().st_size):
+            if report in COMBINED_REPORT_NAMES:
                 path = await asyncio.to_thread(ensure_all_matches_report, project_dir, report)
             if reports_dir not in path.parents or not path.is_file():
                 raise ValueError("Report not found")

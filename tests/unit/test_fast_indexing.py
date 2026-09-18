@@ -9,13 +9,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from archive_scout.cdx.client import HttpClient, TransientRequestError
-from archive_scout.cdx.indexer import index_archive, index_windows
+from archive_scout.cdx.indexer import _request_paged_count, decode_plan, index_archive, index_windows
 from archive_scout.cdx.parallel import fetch_cdx_pages
 from archive_scout.cdx.parameters import cdx_query_signature
 from archive_scout.config import MediaConfig, NetworkConfig, ProjectConfig, load_project_config
 from archive_scout.database.connection import open_database
 from archive_scout.database.repositories import get_or_create_target, upsert_captures
 from archive_scout.downloads.rate_limit import FixedRateLimiter
+from archive_scout.events import ConnectivityPaused
 from archive_scout.media.indexer import index_media
 from archive_scout.network.transports import TransportResponse
 from archive_scout.utils import utc_now
@@ -117,7 +118,7 @@ class FastIndexingTests(unittest.TestCase):
             self.assertEqual(database.execute("SELECT complete FROM index_state").fetchone()[0], 1)
             database.close()
 
-    def test_repeated_slow_page_falls_back_to_smaller_resume_windows(self):
+    def test_repeated_slow_page_saves_only_exact_failed_page(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = ProjectConfig(
@@ -149,12 +150,18 @@ class FastIndexingTests(unittest.TestCase):
                 return []
 
             with patch("archive_scout.cdx.client.HttpClient.get_cdx_any", new=fake_get):
-                index_archive(config, database, threading.Event())
+                with self.assertRaises(ConnectivityPaused):
+                    index_archive(config, database, threading.Event())
 
-            self.assertEqual(page_calls.get(1), 2)
-            self.assertGreater(resume_calls, 0)
+            self.assertEqual(page_calls.get(1), 5)
+            self.assertEqual(resume_calls, 0)
             self.assertEqual(database.execute("SELECT COUNT(*) FROM captures").fetchone()[0], 2)
-            self.assertEqual(database.execute("SELECT complete FROM index_state").fetchone()[0], 1)
+            state = database.execute("SELECT complete,resume_key FROM index_state").fetchone()
+            self.assertEqual(state["complete"], 0)
+            plan = decode_plan(state["resume_key"], [])
+            self.assertEqual(plan.pending[0].strategy, "paged")
+            self.assertEqual(plan.pending[0].retry_pages, [1])
+            self.assertEqual(plan.pending[0].page_failures, {1: 5})
             database.close()
 
     def test_page_count_timeout_switches_to_resumable_windows(self):
@@ -187,6 +194,65 @@ class FastIndexingTests(unittest.TestCase):
             self.assertGreater(calls, 1)
             self.assertLess(calls, 20)
             self.assertEqual(database.execute("SELECT complete FROM index_state").fetchone()[0], 1)
+            database.close()
+
+    def test_timemap_page_count_gets_five_native_json_attempts(self):
+        class CountClient:
+            retry_callback = None
+
+            def __init__(self):
+                self.calls = 0
+
+            def get_cdx_any(self, _urls, _params, max_bytes=0, prefer_text=False):
+                del max_bytes, prefer_text
+                self.calls += 1
+                raise TransientRequestError("count timeout", timed_out=True, splittable=True)
+
+        client = CountClient()
+        config = ProjectConfig(
+            output_dir=Path("."), targets=["example.com/*"], keywords=[], retries=1
+        ).normalized()
+        with self.assertRaises(TransientRequestError):
+            _request_paged_count(
+                client,
+                ("https://web.archive.org/web/timemap/json",),
+                [("showNumPages", "true")],
+                config,
+                threading.Event(),
+            )
+        self.assertEqual(client.calls, 5)
+
+    def test_paged_index_emits_live_page_progress(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = ProjectConfig(
+                output_dir=root,
+                targets=["example.com/*"],
+                keywords=[],
+                from_date="20010101",
+                to_date="20010101",
+                cdx_delay=0,
+                network=NetworkConfig(index_strategy="paged", page_blocks=2, cdx_workers=2),
+            ).normalized()
+            database = open_database(root)
+            messages: list[str] = []
+
+            def fake_get(_self, _urls, params, max_bytes=0, prefer_text=False):
+                del max_bytes, prefer_text
+                values = dict(params)
+                if values.get("showNumPages") == "true":
+                    return 2
+                page = int(values["page"])
+                return [HEADER, [f"2001010100000{page}", f"http://example.com/{page}", "text/html", "200", str(page), "1"]]
+
+            with patch("archive_scout.cdx.client.HttpClient.get_cdx_any", new=fake_get):
+                index_archive(
+                    config,
+                    database,
+                    threading.Event(),
+                    callback=lambda event: messages.append(event.message),
+                )
+            self.assertTrue(any("completed 2/2 Timemap pages" in message for message in messages))
             database.close()
 
     def test_text_output_is_requested_first_for_bulk_pages(self):

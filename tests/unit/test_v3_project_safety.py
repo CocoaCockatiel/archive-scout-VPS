@@ -54,7 +54,7 @@ class V3ProjectSafetyTests(unittest.TestCase):
                 "archive_scout.operations.merge_projects", return_value={"documents": 0}
             ):
                 paths = run_project(config, mode="merge_project")
-            backup.assert_called_once_with(destination.resolve(), reason="before_merge", keep=4)
+            backup.assert_called_once_with(destination.resolve(), reason="before_merge", keep=4, max_mb=1024.0)
             self.assertTrue(paths["merge_summary"].exists())
 
 

@@ -324,6 +324,8 @@ class HttpClient:
         destination: Path,
         max_bytes: int,
         accept: str = "*/*",
+        *,
+        compute_hash: bool = True,
     ) -> dict:
         """Stream a response to disk while retaining the normal Wayback policy."""
         headers = {
@@ -341,16 +343,30 @@ class HttpClient:
 
         while True:
             ensure_frozen_bundle_available()
-            destination.unlink(missing_ok=True)
+            existing_size = destination.stat().st_size if destination.exists() else 0
+            request_headers = dict(headers)
+            if existing_size > 0:
+                request_headers["Range"] = f"bytes={existing_size}-"
+                # Range offsets apply to the identity representation.
+                request_headers["Accept-Encoding"] = "identity"
             permit = self.host_gate.acquire_request(self.stop_event)
             try:
                 with self.limiter.slot(self.stop_event):
                     if not self.host_gate.permit_is_current(permit):
                         self.host_gate.finish_request(permit, recovered=False)
                         continue
-                    response = self.transport.download(
-                        url, headers, destination, max_bytes, self.stop_event
-                    )
+                    if compute_hash:
+                        # Preserve the long-standing transport extension contract for
+                        # normal callers; the resource-lean acquisition path opts into
+                        # the new no-hash flag explicitly.
+                        response = self.transport.download(
+                            url, request_headers, destination, max_bytes, self.stop_event
+                        )
+                    else:
+                        response = self.transport.download(
+                            url, request_headers, destination, max_bytes, self.stop_event,
+                            compute_hash=False,
+                        )
                 status = int(response.status)
                 retry_after_header = response.headers.get("retry-after") or response.headers.get("Retry-After")
                 if status in {429, 503}:
@@ -398,18 +414,23 @@ class HttpClient:
                     "backend": response.backend,
                     "elapsed": response.elapsed,
                 }
-            except (RateLimitDeferred, Stopped):
+            except RateLimitDeferred:
                 destination.unlink(missing_ok=True)
                 self.host_gate.finish_request(permit, recovered=False)
                 raise
+            except Stopped:
+                self.host_gate.finish_request(permit, recovered=False)
+                raise
             except RuntimeError as exc:
-                destination.unlink(missing_ok=True)
                 self.host_gate.finish_request(permit, recovered=False)
                 if isinstance(exc, TransientRequestError):
                     raise
                 if is_missing_frozen_bundle_error(exc):
+                    destination.unlink(missing_ok=True)
                     raise frozen_bundle_error_from_exception(exc) from exc
                 if isinstance(exc, TransportExhaustedError):
+                    # Preserve any bytes already streamed to the .part file. A
+                    # retry (or the next application run) can request the rest.
                     timed_out = is_timeout_error(exc)
                     read_timed_out = bool(getattr(exc, "read_timed_out", False))
                     generic_attempt += 1
@@ -422,11 +443,14 @@ class HttpClient:
                         ) from exc
                     self.retry_wait(generic_attempt - 1, "read timeout" if timed_out else str(exc))
                     continue
+                # Local validation failures (for example max-size rejection) are
+                # not valid resume state.
+                destination.unlink(missing_ok=True)
                 raise
             except (httpx.HTTPError, urllib3.exceptions.HTTPError, TimeoutError, OSError) as exc:
-                destination.unlink(missing_ok=True)
                 self.host_gate.finish_request(permit, recovered=False)
                 if is_missing_frozen_bundle_error(exc):
+                    destination.unlink(missing_ok=True)
                     raise frozen_bundle_error_from_exception(exc) from exc
                 timed_out = is_timeout_error(exc)
                 read_timed_out = is_transport_read_timeout(exc)
@@ -469,6 +493,24 @@ class HttpClient:
         with self.endpoint_lock:
             self.endpoint_cooldown_until[endpoint] = time.monotonic() + 20.0
 
+    @staticmethod
+    def _cdx_format_attempts(endpoint: str, prefer_text: bool) -> tuple[str, str]:
+        """Try an endpoint's native representation before its fallback.
+
+        Wayback's path-specific Timemap endpoints can ignore ``output=txt`` or
+        ``output=json``.  In particular, ``/web/timemap/json`` commonly returns
+        JSON even when a caller asked for text.  Trying text first there made a
+        valid response look malformed and caused every numbered page to be
+        downloaded a second time.  The generic CDX endpoint still honors the
+        caller's low-memory text preference.
+        """
+        path = urllib.parse.urlsplit(endpoint).path.rstrip("/").casefold()
+        if path.endswith("/web/timemap/json"):
+            return ("json", "text")
+        if path.endswith("/web/timemap/cdx"):
+            return ("text", "json")
+        return ("text", "json") if prefer_text else ("json", "text")
+
     def get_cdx_any(
         self,
         urls: Iterable[str],
@@ -484,7 +526,7 @@ class HttpClient:
         text_params = cdx_text_fallback_params(params)
 
         for endpoint in endpoints:
-            attempts = ("text", "json") if prefer_text else ("json", "text")
+            attempts = self._cdx_format_attempts(endpoint, prefer_text)
             first_error: BaseException | None = None
             for format_name in attempts:
                 request_params = text_params if format_name == "text" else params
@@ -492,10 +534,9 @@ class HttpClient:
                 try:
                     accept = "text/plain,*/*" if format_name == "text" else "application/json,text/plain,*/*"
                     response = self.get(full_url, max_bytes, accept)
-                    if format_name == "text":
-                        payload = parse_cdx_text_response(response["data"], endpoint, request_params)
-                    else:
-                        payload = parse_json_response(response["data"], endpoint)
+                    payload = parse_cdx_response_data(
+                        response["data"], endpoint, request_params, format_name
+                    )
                     self._remember_endpoint_success(endpoint)
                     return payload
                 except MemoryError as exc:
@@ -508,7 +549,11 @@ class HttpClient:
                     first_error = first_error or exc
                     if self.retry_callback:
                         other = "JSON" if format_name == "text" else "line-oriented text"
-                        self.retry_callback(1, 1, f"CDX {format_name} response was incomplete; retrying as {other}", 0.0)
+                        self.retry_callback(
+                            1, 1,
+                            f"CDX {format_name} response was malformed or truncated; retrying as {other}",
+                            0.0,
+                        )
                     continue
                 except TransientRequestError as exc:
                     first_error = first_error or exc
@@ -598,7 +643,7 @@ class HttpClient:
         text_params = cdx_text_fallback_params(params)
 
         for endpoint in endpoints:
-            attempts = ("text", "json") if prefer_text else ("json", "text")
+            attempts = self._cdx_format_attempts(endpoint, prefer_text)
             first_error: BaseException | None = None
             for format_name in attempts:
                 request_params = text_params if format_name == "text" else params
@@ -606,10 +651,9 @@ class HttpClient:
                 try:
                     accept = "text/plain,*/*" if format_name == "text" else "application/json,text/plain,*/*"
                     response = self.get(full_url, max_bytes, accept)
-                    if format_name == "text":
-                        result = parse_cdx_text_rows(response["data"], endpoint, request_params)
-                    else:
-                        result = parse_cdx_rows_payload(parse_json_response(response["data"], endpoint))
+                    result = parse_cdx_rows_response_data(
+                        response["data"], endpoint, request_params, format_name
+                    )
                     self._remember_endpoint_success(endpoint)
                     return result
                 except MemoryError as exc:
@@ -622,7 +666,11 @@ class HttpClient:
                     first_error = first_error or exc
                     if self.retry_callback:
                         other = "JSON" if format_name == "text" else "line-oriented text"
-                        self.retry_callback(1, 1, f"CDX {format_name} response was incomplete; retrying as {other}", 0.0)
+                        self.retry_callback(
+                            1, 1,
+                            f"CDX {format_name} response was malformed or truncated; retrying as {other}",
+                            0.0,
+                        )
                     continue
                 except TransientRequestError as exc:
                     first_error = first_error or exc
@@ -671,6 +719,99 @@ class HttpClient:
     ) -> object:
         return self.get_cdx_any(urls, params, max_bytes=max_bytes, prefer_text=False)
 
+    def get_cdx_json_any(
+        self,
+        urls: Iterable[str],
+        params: list[tuple[str, str]],
+        max_bytes: int = 64 * 1024 * 1024,
+    ) -> object:
+        """Fetch one native JSON representation per endpoint.
+
+        Numbered Timemap paging is a JSON protocol.  It must not turn one bad
+        page into a second text request for the same page; the page scheduler
+        owns retries and durable failed-page state.
+        """
+        return self._get_cdx_native_json(urls, params, max_bytes, compact=False)
+
+    def get_cdx_json_rows_any(
+        self,
+        urls: Iterable[str],
+        params: list[tuple[str, str]],
+        max_bytes: int = 64 * 1024 * 1024,
+    ) -> CDXRows:
+        """Compact-row native JSON fetch used by numbered Timemap pages."""
+        result = self._get_cdx_native_json(urls, params, max_bytes, compact=True)
+        if not isinstance(result, CDXRows):
+            raise RuntimeError("native CDX JSON row parser returned an unexpected result")
+        return result
+
+    def _get_cdx_native_json(
+        self,
+        urls: Iterable[str],
+        params: list[tuple[str, str]],
+        max_bytes: int,
+        *,
+        compact: bool,
+    ) -> object | CDXRows:
+        endpoints = self._ordered_endpoints(urls)
+        if not endpoints:
+            raise ValueError("at least one endpoint is required")
+        failures: list[tuple[str, TransientRequestError]] = []
+        for endpoint in endpoints:
+            full_url = endpoint + "?" + urllib.parse.urlencode(params, doseq=True)
+            try:
+                response = self.get(full_url, max_bytes, "application/json,*/*")
+                payload = parse_json_response(response["data"], endpoint)
+                result = parse_cdx_rows_payload(payload) if compact else payload
+                self._remember_endpoint_success(endpoint)
+                return result
+            except MemoryError as exc:
+                raise TransientRequestError(
+                    f"CDX JSON parsing exceeded available memory at {endpoint}",
+                    splittable=True,
+                    endpoint=endpoint,
+                ) from exc
+            except MalformedCDXResponse as exc:
+                exc.endpoint = endpoint
+                failure = exc
+            except TransientRequestError as exc:
+                exc.endpoint = endpoint
+                if (
+                    exc.connection_failed
+                    or exc.read_timed_out
+                    or exc.timed_out
+                    or "safe in-memory budget" in str(exc)
+                ):
+                    self._remember_endpoint_failure(endpoint)
+                    raise
+                failure = exc
+            except RuntimeError as exc:
+                if str(exc).startswith("HTTP ") or str(exc).startswith("response exceeds"):
+                    raise
+                failure = MalformedCDXResponse(
+                    f"CDX JSON response was unusable at {endpoint}: {exc}",
+                    splittable=True,
+                    endpoint=endpoint,
+                )
+            self._remember_endpoint_failure(endpoint)
+            failures.append((endpoint, failure))
+            if self.retry_callback and len(endpoints) > 1:
+                self.retry_callback(
+                    1,
+                    len(endpoints),
+                    f"Endpoint unavailable: {endpoint}; trying alternate CDX service",
+                    0.0,
+                )
+
+        summary = "; ".join(f"{endpoint}: {exc}" for endpoint, exc in failures)
+        raise TransientRequestError(
+            f"all native JSON CDX endpoints failed: {summary}",
+            timed_out=any(exc.timed_out for _, exc in failures),
+            read_timed_out=any(exc.read_timed_out for _, exc in failures),
+            connection_failed=bool(failures) and all(exc.connection_failed for _, exc in failures),
+            splittable=any(exc.splittable for _, exc in failures),
+        ) from (failures[-1][1] if failures else None)
+
     def retry_wait(self, attempt: int, reason: str, retry_after: float | None = None) -> None:
         base = max(float(retry_after or 0), min(120.0, 2**attempt))
         wait_seconds = base * random.uniform(0.85, 1.2)
@@ -707,6 +848,94 @@ def request_cdx_rows(
         urls, params, max_bytes=max_bytes, prefer_text=prefer_text
     )
     return parse_cdx_rows_payload(payload)
+
+
+def _uses_builtin_cdx_getter(client: object) -> bool:
+    getter = getattr(type(client), "get_cdx_any", None)
+    return (
+        getattr(getter, "__module__", "") == __name__
+        and getattr(getter, "__name__", "") == "get_cdx_any"
+    )
+
+
+def request_cdx_json_payload(
+    client: object,
+    urls: Iterable[str],
+    params: list[tuple[str, str]],
+    max_bytes: int = 64 * 1024 * 1024,
+) -> object:
+    """Use native JSON in production while retaining the established mock API."""
+    strict_getter = getattr(client, "get_cdx_json_any", None)
+    if callable(strict_getter) and _uses_builtin_cdx_getter(client):
+        return strict_getter(urls, params, max_bytes=max_bytes)
+    return client.get_cdx_any(urls, params, max_bytes=max_bytes, prefer_text=False)
+
+
+def request_cdx_json_rows(
+    client: object,
+    urls: Iterable[str],
+    params: list[tuple[str, str]],
+    max_bytes: int = 64 * 1024 * 1024,
+) -> CDXRows:
+    """Fetch a numbered page as native JSON without representation fallback."""
+    strict_getter = getattr(client, "get_cdx_json_rows_any", None)
+    if callable(strict_getter) and _uses_builtin_cdx_getter(client):
+        return strict_getter(urls, params, max_bytes=max_bytes)
+    payload = client.get_cdx_any(urls, params, max_bytes=max_bytes, prefer_text=False)
+    return parse_cdx_rows_payload(payload)
+
+
+def _looks_like_json_container(data: bytes | bytearray | memoryview) -> bool:
+    """Return whether a CDX body starts like a JSON table/error object."""
+    prefix = bytes(data[:64]).lstrip(b"\xef\xbb\xbf \t\r\n")
+    return prefix.startswith((b"[", b"{"))
+
+
+def parse_cdx_response_data(
+    data: bytes,
+    endpoint: str,
+    params: list[tuple[str, str]],
+    requested_format: str,
+) -> object:
+    """Parse the representation Wayback returned, not merely the one requested.
+
+    Path-specific Timemap services occasionally ignore the ``output`` query
+    parameter.  A valid response in the other representation can therefore be
+    consumed locally instead of issuing the same expensive CDX request again.
+    Bodies which actually look like truncated JSON still raise and use the
+    normal representation/endpoint recovery path.
+    """
+    looks_json = _looks_like_json_container(data)
+    if requested_format == "text":
+        if looks_json:
+            return parse_json_response(data, endpoint)
+        return parse_cdx_text_response(data, endpoint, params)
+    try:
+        return parse_json_response(data, endpoint)
+    except MalformedCDXResponse:
+        if looks_json:
+            raise
+        return parse_cdx_text_response(data, endpoint, cdx_text_fallback_params(params))
+
+
+def parse_cdx_rows_response_data(
+    data: bytes | bytearray,
+    endpoint: str,
+    params: list[tuple[str, str]],
+    requested_format: str,
+) -> CDXRows:
+    """Compact-row equivalent of :func:`parse_cdx_response_data`."""
+    looks_json = _looks_like_json_container(data)
+    if requested_format == "text":
+        if looks_json:
+            return parse_cdx_rows_payload(parse_json_response(bytes(data), endpoint))
+        return parse_cdx_text_rows(data, endpoint, params)
+    try:
+        return parse_cdx_rows_payload(parse_json_response(bytes(data), endpoint))
+    except MalformedCDXResponse:
+        if looks_json:
+            raise
+        return parse_cdx_text_rows(data, endpoint, cdx_text_fallback_params(params))
 
 def parse_json_response(data: bytes, endpoint: str = "") -> object:
     raw = data.decode("utf-8", "replace").lstrip("\ufeff").strip()

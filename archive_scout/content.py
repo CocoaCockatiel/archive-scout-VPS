@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import html
 import re
 import urllib.parse
@@ -81,60 +82,121 @@ def title_from_html(raw: str) -> str:
     return clean_space(html.unescape(TAG_PATTERN.sub(" ", match.group(1))))[:500]
 
 
-def decode_bytes(data: bytes, content_type: str = "") -> str:
+def detect_encoding(data: bytes, content_type: str = "") -> str:
+    """Choose a decoding label without treating UTF-16/32 NUL bytes as binary."""
+    if data.startswith(codecs.BOM_UTF8):
+        return "utf-8-sig"
+    if data.startswith(codecs.BOM_UTF32_LE):
+        return "utf-32-le"
+    if data.startswith(codecs.BOM_UTF32_BE):
+        return "utf-32-be"
+    if data.startswith(codecs.BOM_UTF16_LE):
+        return "utf-16-le"
+    if data.startswith(codecs.BOM_UTF16_BE):
+        return "utf-16-be"
     candidates: list[str] = []
-    charset_match = CHARSET_PATTERN.search(content_type)
+    charset_match = CHARSET_PATTERN.search(content_type or "")
     if charset_match:
         candidates.append(charset_match.group(1))
-    head = data[:4096].decode("ascii", "ignore")
+    head = data[:16384].decode("ascii", "ignore")
     meta_match = CHARSET_PATTERN.search(head)
     if meta_match:
         candidates.append(meta_match.group(1))
+    xml_match = re.search(r"(?i)<\?xml[^>]+encoding\s*=\s*[\"']([^\"']+)[\"']", head)
+    if xml_match:
+        candidates.append(xml_match.group(1))
+    sample = data[:4096]
+    if len(sample) >= 8:
+        even_nuls = sum(1 for i in range(0, len(sample), 2) if sample[i] == 0)
+        odd_nuls = sum(1 for i in range(1, len(sample), 2) if sample[i] == 0)
+        halves = max(1, len(sample) // 2)
+        if odd_nuls / halves > 0.25 and even_nuls / halves < 0.05:
+            candidates.append("utf-16-le")
+        elif even_nuls / halves > 0.25 and odd_nuls / halves < 0.05:
+            candidates.append("utf-16-be")
     candidates.extend(["utf-8", "windows-1252", "latin-1"])
-    for encoding in dict.fromkeys(candidates):
+    for encoding in dict.fromkeys(value.casefold() for value in candidates if value):
         try:
-            return data.decode(encoding)
+            codecs.lookup(encoding)
+            data.decode(encoding)
+            return encoding
         except (LookupError, UnicodeDecodeError):
             continue
-    return data.decode("utf-8", "replace")
+    return "utf-8"
+
+
+def decode_bytes(data: bytes, content_type: str = "") -> str:
+    encoding = detect_encoding(data, content_type)
+    try:
+        return data.decode(encoding)
+    except (LookupError, UnicodeDecodeError):
+        return data.decode("utf-8", "replace")
 
 
 def looks_textual_bytes(data: bytes, content_type: str = "") -> bool:
-    mime = (content_type or "").split(";", 1)[0].lower()
-    if mime.startswith("text/") or any(token in mime for token in ("html", "xml", "json", "javascript")):
+    mime = (content_type or "").split(";", 1)[0].strip().casefold()
+    if mime.startswith("text/") or any(token in mime for token in ("html", "xml", "json", "javascript", "svg")):
         return True
-    if mime.startswith(("image/", "audio/", "video/", "font/")):
-        return False
-    if b"\x00" in data[:4096]:
-        return False
+    if data.startswith((codecs.BOM_UTF8, codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE, codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        return True
     if not data:
         return True
-    sample = data[:4096]
+    encoding = detect_encoding(data[:16384], content_type)
+    if encoding.startswith(("utf-16", "utf-32")):
+        try:
+            decoded = data[:16384].decode(encoding, "strict")
+            if decoded and sum(ch.isprintable() or ch.isspace() for ch in decoded) / max(1, len(decoded)) > 0.85:
+                return True
+        except UnicodeDecodeError:
+            pass
+    if mime.startswith(("image/", "audio/", "video/", "font/")) and "svg" not in mime:
+        return False
+    sample = data[:8192]
+    if b"\x00" in sample:
+        return False
     control = sum(byte < 9 or 13 < byte < 32 for byte in sample)
     return control / len(sample) < 0.05
 
 
-def is_text_candidate(url: str, mimetype: str = "") -> bool:
+def classify_text_candidate(url: str, mimetype: str = "") -> str:
+    """Return text, binary, or ambiguous from archive metadata."""
     parsed = safe_urlsplit(url)
     if parsed:
         filename = parsed.path.rsplit("/", 1)[-1]
         dot = filename.rfind(".")
-        extension = filename[dot:].lower() if dot > 0 else ""
+        extension = filename[dot:].casefold() if dot > 0 else ""
     else:
         extension = ""
-    mime = (mimetype or "").split(";", 1)[0].lower()
-    if extension in TEXT_EXTENSIONS:
-        return True
-    if extension in BINARY_EXTENSIONS:
-        return False
-    if mime.startswith("text/") or any(token in mime for token in ("html", "xml", "json", "javascript")):
-        return True
-    if mime.startswith(("image/", "audio/", "video/", "font/")):
-        return False
-    if any(token in mime for token in ("zip", "rar", "gzip", "pdf", "octet-stream", "shockwave", "msword")):
-        return False
-    return True
+    mime = (mimetype or "").split(";", 1)[0].strip().casefold()
+    ext_text = extension in TEXT_EXTENSIONS or extension == ".svg"
+    ext_binary = extension in BINARY_EXTENSIONS and extension != ".svg"
+    mime_text = mime.startswith("text/") or any(token in mime for token in ("html", "xml", "json", "javascript", "svg"))
+    mime_binary = (
+        mime.startswith(("image/", "audio/", "video/", "font/"))
+        or any(token in mime for token in ("zip", "rar", "gzip", "pdf", "shockwave", "msword"))
+    ) and "svg" not in mime
+    weak_mime = not mime or "octet-stream" in mime or mime in {"application/binary", "binary/octet-stream"}
+    if ext_text and not mime_binary:
+        return "text"
+    if mime_text and not ext_binary:
+        return "text"
+    if (ext_text and mime_binary) or (ext_binary and mime_text):
+        return "ambiguous"
+    if ext_binary and mime_binary:
+        return "binary"
+    if ext_binary and weak_mime:
+        return "ambiguous"
+    if mime_binary and not extension:
+        return "ambiguous"
+    if mime_binary and extension and not ext_text:
+        return "binary"
+    if weak_mime or not extension:
+        return "ambiguous"
+    return "text"
 
+
+def is_text_candidate(url: str, mimetype: str = "") -> bool:
+    return classify_text_candidate(url, mimetype) != "binary"
 
 def parse_page(raw: str, original: str) -> tuple[str, str, list[str]]:
     links: set[str] = set()

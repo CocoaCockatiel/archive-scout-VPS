@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,14 +34,22 @@ class EndToEndTests(unittest.TestCase):
             ]
             page = b"<html><title>9/11 discussion</title><body>WTC jumpers and canopy footage</body></html>"
 
-            with patch("archive_scout.cdx.client.HttpClient.get_cdx_any", return_value=cdx_payload), patch(
-                "archive_scout.cdx.client.HttpClient.get",
-                return_value={
-                    "data": page,
+            def streamed(_client, _url, destination, _max_bytes, accept="*/*"):
+                destination.write_bytes(page)
+                return {
+                    "path": destination,
+                    "bytes": len(page),
+                    "content_hash": hashlib.sha256(page).hexdigest(),
+                    "preview": page,
                     "status": 200,
                     "headers": {"Content-Type": "text/html; charset=utf-8"},
                     "final_url": "https://web.archive.org/web/20060102030405id_/http://example.com/thread/1",
-                },
+                    "backend": "mock",
+                    "elapsed": 0.0,
+                }
+
+            with patch("archive_scout.cdx.client.HttpClient.get_cdx_any", return_value=cdx_payload), patch(
+                "archive_scout.cdx.client.HttpClient.download_to_path", streamed
             ):
                 paths = run_project(config, "all")
             self.assertTrue(paths["matches_ranked"].exists())

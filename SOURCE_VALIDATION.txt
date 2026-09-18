@@ -1,68 +1,63 @@
-Archive Scout 1.0.5 source validation
-Date: 2026-09-12
+Archive Scout 1.0.7 source validation
+Date: 2026-09-17
 
 Release scope
-- Fast-indexing and flat-media release built on Archive Scout 1.0.4 and database schema version 7.
-- Automatic URL indexing now follows the reference downloader's Timemap acquisition model: Timemap JSON first, showNumPages once per saved window, fixed pageSize=9 in Auto mode, ten concurrent page workers, 0.75-second shared CDX request spacing (about 80 request starts/minute), and rolling queues of up to 1,000 numbered pages.
-- Successful numbered pages are consumed and committed individually as they finish; one slow page does not create a ten-request batch barrier.
-- Auto mode forces pageSize=9 even when an older saved queue carried another numbered-page block value. Explicit paged mode still permits custom page grouping.
-- Timemap showNumPages parsing accepts the reference service's two-row JSON table shape as well as Archive Scout's existing compatibility shapes.
-- Resume-key traversal remains available explicitly and remains the recovery fallback when Timemap pagination is unavailable, repeatedly pathological, or must be subdivided.
-- Direct-media indexing uses the same Timemap-first page-count / pageSize=9 / ten-worker / 1,000-page pipeline in Auto mode.
-- Media output is fixed to two flat directories only for v1.0.5-created output: media/images and media/videos. No host, timestamp, URL-path, fingerprint, or nested media directories are created by normal v1.0.5 media downloads or project merges.
-- Media filenames use the raw final URL path component. Timestamp/database-id prefixes are removed and percent-escaped URL spelling is retained. Characters that cannot be represented as one portable Windows/macOS/Linux filename are percent-escaped rather than replaced with opaque names.
-- Media replay acquisition follows the reference downloader's modifier logic: if_ for normal files and oe_ for SWF.
-- Media replay keeps the v1.0.4 fast envelope of ten workers and 0.125-second shared request-start spacing (eight starts/second by default), guarantees at least five transient attempts, prioritizes known-small captures, and reuses an exact existing destination without another network request.
-- Existing v1.0.4 text-format coverage, high-throughput text replay, native/fallback scan accelerators, index-only report repair, recovery controls, AI/Research Intelligence, review state, CLI automation, and project safety remain intact.
+- Preserves the v1.0.5-style high-throughput acquisition envelope already restored in the 1.0.6.x line: ten CDX workers, native Timemap paging, 0.75-second CDX spacing, ten replay workers, and 0.125-second replay request spacing by default.
+- Moves expensive startup preparation off the Tk/UI thread so Start creates a worker immediately instead of remaining indefinitely at "Starting..." while bundle/database preparation blocks the interface.
+- Extends optional follow-up media acquisition to Index and download only (no scanning) runs while preserving the lean acquisition-only database model.
+- Keeps primary text/index CDX settings independent from secondary media indexing. Default/earliest follow-up media uses collapse=urlkey (one timestamp per normalized media URL); explicit media latest/all choices remain media-only overrides.
+- Adds a comprehensive Reports matrix: each standard text/index/error/media/archive-analysis report can be enabled or disabled, and every field/section in those reports can be individually included or excluded.
+- Avoids computing and persisting report-only scan enrichment when no enabled report needs it. Existing obsolete hit-detail, snippet, interesting-link, and untouched default-review payloads are cleared once when the report-storage policy changes.
+- Database schema remains version 8. No destructive project migration is introduced.
 
-Automated validation
-- 196 automated tests ran: 193 passed and 3 were skipped.
-- 3 tests were skipped in this environment: 1 display-dependent theme test and 2 native-accelerator execution tests because those optional native wheels are not installed locally. The CI matrix installs the declared runtime dependencies and executes the native-path checks.
-- New v1.0.5 regression coverage verifies the fixed Auto Timemap profile, forced pageSize=9 for legacy saved queues, 1,000-page rolling queue selection, Timemap's two-row showNumPages response, v1.0.4 automatic-profile migration, flat images/videos media paths, raw percent-escaped URL filenames, if_/oe_ replay modifiers, two-folder creation, and no-network reuse of an exact existing media destination.
-- Existing database migration tests passed; database schema remains version 7 and no schema migration is required from v1.0.4.
-- Python compilation completed for archive_scout, tests, scripts, run_app.py, and run_cli.py.
-- scripts/build_linux.sh passed bash syntax validation.
-- scripts/build_macos.sh passed bash syntax validation.
-- git diff --check passed.
-- Python wheel packaging completed successfully as archive_scout-1.0.5-py3-none-any.whl using pip --no-deps --no-build-isolation.
-- Wheel SHA256: 525327ea4bbaa58aff5ae7946cdc0b1abd8b162676a733eebf982bc9cf093ede.
-- Public application/package version is 1.0.5.
-- Database schema version is 7.
+Report customization and SQLite behavior
+- Report output and field selections persist in project.json through ReportConfig.
+- Disabling a report removes stale generated copies rather than leaving an old report that no longer reflects project settings.
+- Keyword hit-count JSON is persisted only when keyword counts or ranked keyword-hit output requires it.
+- Keyword field-detail JSON is persisted only when ranked keyword-hit detail requires it.
+- Snippet JSON is persisted only when ranked snippets are enabled.
+- Interesting-link JSON is persisted only when the standalone Interesting Links report or ranked Interesting Links section is enabled.
+- Untouched default "unreviewed" review rows are not created when ranked review status is disabled; genuine human review state is preserved.
+- A report-storage policy fingerprint in project_meta prevents repeated whole-table cleanup work on every report generation.
+- Core project state is intentionally not treated as report-only data: capture URLs/timestamps, queue states, local paths, retry/error state, scores/linkage required by active operations, and other resume/integrity records remain available even if corresponding report fields are hidden.
+- SQLite may retain free pages after old report-only values are nulled/deleted until Compact Project/VACUUM reclaims them physically; the disabled payloads are no longer live data and new rows do not recreate them.
 
-Indexing-performance validation
-- Auto selects paged acquisition and places the Timemap JSON endpoint first while retaining CDX/Timemap fallback endpoints.
-- Auto uses pageSize=9 and effective_page_workers(10, 9) resolves to ten concurrent numbered-page workers.
-- A synthetic saved queue with page_blocks=50 is normalized to pageSize=9 when Auto mode resumes, preventing old settings from reducing the new fast pipeline's concurrency.
-- The page scheduler selects up to 1,000 page numbers at a time and feeds them through the bounded ten-thread request pool; results are yielded as each future completes.
-- The existing shared CDX limiter retains 0.75-second request-start spacing, matching the reference downloader's StrictLimiter(80/60) request envelope while preserving Archive Scout's process-wide host gate and recovery state.
-- Direct-media indexing uses the same page-count, fixed grouping, concurrency, endpoint order, and rolling-queue architecture.
-- Resume-key traversal and date-window subdivision remain intact as recovery mechanisms rather than the normal Auto acquisition path.
+Download-only media behavior
+- The download-only path still performs no keyword/document scan and does not create fake scan jobs merely to enable media acquisition.
+- When media is enabled, download-only can index/download images and videos after its normal capture acquisition.
+- Applicable Media-page settings carry through, including image/video selection, embedded discovery, external-host permission, extension filters, maximum media size, and media snapshot strategy.
+- Embedded-media discovery can inspect downloaded_unscanned capture files directly and queue discovered media with a nullable source_document_id, leaving the documents table untouched.
+- Existing durable media discovery/download tables continue to provide resume and deduplication state without a schema change.
 
-Media-layout and fetching validation
-- A media run with no pending captures creates media/images and media/videos and no other child folders.
-- Image and video path tests confirm one flat filename level beneath the respective type directory.
-- URL path spelling is preserved: a URL ending in photo%20one.jpg is stored as media/images/photo%20one.jpg rather than being decoded, timestamped, hashed, or placed in a host/path tree.
-- Normal replay URLs contain <timestamp>if_/ and SWF replay URLs contain <timestamp>oe_/.
-- If the exact flat destination already exists, fetch_media hashes/reuses it and does not invoke network download, matching the reference downloader's preflight behavior.
-- Download scheduling remains length-aware: known-size media is streamed in ascending length order before unknown-size rows.
-- Media HTTP work remains bounded by the configured worker pool and shared request-start limiter; response bodies stream to .part files and are atomically promoted instead of being held as whole-project in-memory buffers.
+Text/media CDX isolation
+- The primary text/index ProjectConfig is never mutated merely because follow-up media is enabled.
+- Default/earliest secondary media indexing derives a separate config with collapse=urlkey.
+- Explicit media latest/all strategies do not impose the automatic urlkey collapse on that media query.
+- Dedicated text collapse choices continue to apply only to the primary text/index query.
 
-Offline 100,000-row performance validation
-- 100,000 CDX rows parsed in 2.282789 seconds.
-- Literal prefilter benchmark completed in 0.522803 seconds.
-- Literal scoring benchmark completed in 0.498874 seconds.
-- Parse-and-upsert completed in 3.859442 seconds.
-- Repeating the same 100,000-row index completed in 3.079621 seconds and produced 0 unchanged-row database writes.
-- Result browsing (500 rows) completed in 0.010167 seconds.
-- JSON export completed in 0.671984 seconds.
-- HTTP attempts: 0.
+Startup behavior
+- GUI Start performs lightweight form/config validation, enters indeterminate Starting state, and creates the worker before frozen-bundle validation or operation/database initialization.
+- Bundle validation and subsequent heavyweight operation preparation run inside the worker and surface success/failure through the normal event path.
+- The pre-worker synchronous dashboard recount was removed from Start.
 
-Release limitations / remaining gates
-- Offline/source validation does not claim a guaranteed live Internet Archive indexing or media completion rate. Wayback latency, server-side throttling, archive topology, capture size, and temporary service behavior remain external variables.
-- A live Internet Archive large-site stress test was not performed in this validation environment. The release reproduces the reference downloader's request envelopes and Timemap queue architecture without bypassing Archive Scout's coordinated recovery/safety controls.
-- The flat exact-URL-filename policy inherently means two different media URLs with the same final path filename map to the same destination. Matching the reference preflight behavior, the first exact destination already present is reused rather than renamed with an Archive Scout id/timestamp.
-- Existing legacy media trees are not destructively flattened automatically; v1.0.5 stops creating deeper folders and all new/merged media destinations use only images/videos. This avoids silently deleting or overwriting older project files during upgrade.
-- Native Windows, macOS, and Linux distributable binaries were not produced in this container because PyInstaller is not installed here.
-- GitHub Actions must produce and smoke-test the actual native GUI and ArchiveScoutCLI packages on the release commit.
-- Real Windows signing, macOS signing/notarization, and release-upload transactions were not performed.
-- Publish tag v1.0.5 only after the GitHub Actions matrix and native package smoke tests pass on the exact patched release commit.
+Automation compatibility
+- Existing CLI text/JSON/JSONL automation interfaces remain the bot/integration contract.
+- No Discord-specific runtime dependency, Rich Presence loop, or acquisition-hot-path bot activity was added for 1.0.7.
+- Read-only automation commands retain query-only database behavior.
+
+Regression coverage added for 1.0.7
+- Secondary media collapse is isolated from the primary text query.
+- Comprehensive report matrices round-trip through project.json, including intentionally empty field selections.
+- Disabled snippets, interesting-link filtering, keyword-detail payloads, and default review rows are not computed/stored when not required.
+- Changing an existing project to a lean report policy clears obsolete report-only payloads once and then reuses the saved policy fingerprint.
+- Download-only executes the optional media pipeline without creating scan jobs and preserves external-media settings.
+- Embedded-media discovery works directly from downloaded_unscanned capture files without creating documents.
+- Start creates the worker before slow bundle/dashboard initialization.
+- The high-throughput default profile remains ten replay workers, ten CDX workers, 0.75-second CDX spacing, and 0.125-second replay spacing.
+
+Local automated validation
+- Full unit/integration/migration suite: 240 tests run, 237 passed, 3 environment-dependent skips, 0 failed.
+- Python compileall passes for archive_scout, tests, and scripts.
+- Offline 100,000-row benchmark completed with 100,000 inserts, 4 database transactions, zero duplicate work, zero HTTP attempts, and zero unchanged-row rewrites.
+- Database schema remains 8.
+- Native multi-platform GitHub Actions/build smoke tests must still run on the exact release commit before publishing platform binaries.

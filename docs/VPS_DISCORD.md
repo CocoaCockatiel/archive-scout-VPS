@@ -78,6 +78,14 @@ docker compose exec -T archive-scout-bot tar -C /data -czf - projects > archive-
 - `all_matches_ranked.md`, `all_matches_ranked.csv`, and the compatibility
   `all_matches_ranked.txt` combine every qualifying match across original, interrupted, and
   resumed scan runs. Per-scan `matches_ranked.txt` files remain available.
+  Combined exports follow the project's `matches_ranked` output and field selections in
+  Archive Scout 1.0.7. Scan status and keyword-set columns follow the scan-run field;
+  keyword-field details follow keyword hits.
+
+Upgrading from 1.0.5 to 1.0.7 upgrades SQLite schema 7 to 8 when the next project operation
+opens its database. The engine creates a database backup before migration. Existing report
+downloads and live-match queries remain read-only and do not trigger migration. Large
+databases need enough free space for the backup and migration; the first run can take longer.
 
 Long jobs announce completion with a normal channel message rather than relying on the temporary
 slash-command interaction token.

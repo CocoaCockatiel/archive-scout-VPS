@@ -35,7 +35,9 @@ class LiteralAutomaton:
         if unique and ahocorasick_rs is not None:
             # Rust-backed matching releases the GIL for strings, allowing the
             # download/scanning worker pool to keep multiple pages moving.
-            self._native = ahocorasick_rs.AhoCorasick(unique, store_patterns=True)
+            self._native = ahocorasick_rs.AhoCorasick(
+                unique, implementation=ahocorasick_rs.Implementation.DFA, store_patterns=True
+            )
         self._nodes: list[_Node] = [_Node()]
         if self._native is not None:
             return
@@ -105,6 +107,41 @@ class LiteralAutomaton:
             state = nodes[state].transitions.get(character, 0)
             if nodes[state].outputs:
                 matches.update(nodes[state].outputs)
+
+
+    def find_matches(self, text: str, *, overlapping: bool = True) -> list[tuple[str, int, int]]:
+        """Return literal, start, end matches for scoring/snippets.
+
+        Native Aho returns every overlapping match.  The Python fallback emits
+        the same representation so callers can implement regex-equivalent
+        per-pattern non-overlapping counts without a second document scan.
+        """
+        if not text or not self.patterns:
+            return []
+        if self._native is not None:
+            return [
+                (self.patterns[index], int(start), int(end))
+                for index, start, end in self._native.find_matches_as_indexes(text, overlapping=overlapping)
+            ]
+        found: list[tuple[str, int, int]] = []
+        state = 0
+        nodes = self._nodes
+        for offset, character in enumerate(text):
+            while state and character not in nodes[state].transitions:
+                state = nodes[state].failure
+            state = nodes[state].transitions.get(character, 0)
+            for pattern in nodes[state].outputs:
+                end = offset + 1
+                found.append((pattern, end - len(pattern), end))
+        if overlapping:
+            return found
+        accepted: list[tuple[str, int, int]] = []
+        last_end = -1
+        for item in sorted(found, key=lambda value: (value[1], value[2])):
+            if item[1] >= last_end:
+                accepted.append(item)
+                last_end = item[2]
+        return accepted
 
     def find(self, text: str) -> set[str]:
         matches: set[str] = set()

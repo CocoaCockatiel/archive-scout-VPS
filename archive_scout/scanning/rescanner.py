@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import json
 import os
 import sqlite3
@@ -8,28 +9,33 @@ import threading
 from pathlib import Path
 from typing import Callable, Iterator
 
-from ..content import parse_page
+from ..content import decode_bytes, parse_page
 from ..database.repositories import record_error, resolve_errors, save_match, upsert_document
 from ..events import ProgressEvent, Stopped
+from ..document_store import document_body, document_links
 from ..utils import hash_text, normalize_search
 from .jobs import ScanJob
 from .scoring import analyze_content, prepare_analysis_fields
 
 
-def _analyze_saved_document(row: dict[str, object], jobs: list[ScanJob]) -> dict[str, object]:
+def _analyze_saved_document(row: dict[str, object], jobs: list[ScanJob], report_config=None) -> dict[str, object]:
     path = Path(str(row["path"]))
     if not path.exists():
         return {"kind": "missing", "row": row, "path": path}
     try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
-        content_hash = hash_text(raw)
+        data = path.read_bytes()
+        content_hash = hashlib.sha256(data).hexdigest()
         document_changed = content_hash != str(row.get("content_hash") or "")
+        raw = decode_bytes(data, str(row.get("mimetype") or ""))
+        # Avoid retaining both raw bytes and decoded text during the expensive
+        # parse/normalization/scoring phase. Hashing the in-memory bytes also
+        # removes the old second full disk read of every rescanned capture.
+        del data
         if not document_changed:
             try:
                 title = str(row.get("title") or "")
-                visible = str(row.get("body_text") or "")
-                links_payload = json.loads(str(row.get("links_json") or "[]"))
-                links = [str(value) for value in links_payload] if isinstance(links_payload, list) else []
+                visible = document_body(row)
+                links = document_links(row)
             except (TypeError, ValueError, json.JSONDecodeError):
                 document_changed = True
         if document_changed:
@@ -41,15 +47,11 @@ def _analyze_saved_document(row: dict[str, object], jobs: list[ScanJob]) -> dict
             (
                 job.scan_run_id,
                 analyze_content(
-                    str(row["original_url"]),
-                    title,
-                    visible,
-                    raw,
-                    links,
-                    job.patterns,
-                    job.prefilter,
-                    prepared_fields,
-                    prepared_normalized_fields,
+                    str(row["original_url"]), title, visible, raw, links, job.patterns, job.prefilter,
+                    prepared_fields, prepared_normalized_fields,
+                    include_hit_fields=(report_config is None or report_config.store_keyword_fields),
+                    include_snippets=(report_config is None or report_config.store_snippets),
+                    include_interesting_links=(report_config is None or report_config.store_interesting_links),
                 ),
             )
             for job in jobs
@@ -86,7 +88,7 @@ def _document_rows(
         page_clauses = [*clauses, "d.id>?"]
         batch = database.execute(
             """
-            SELECT d.*,c.original_url,c.id AS capture_id FROM documents d
+            SELECT d.*,c.original_url,c.mimetype,c.id AS capture_id FROM documents d
             JOIN captures c ON c.id=d.capture_id
             WHERE """ + " AND ".join(page_clauses) + " ORDER BY d.id LIMIT ?",
             [*params, last_id, max(1, int(batch_size))],
@@ -105,6 +107,7 @@ def rescan_keyword_sets(
     callback: Callable[[ProgressEvent], None] | None = None,
     document_ids: list[int] | None = None,
     workers: int | None = None,
+    report_config=None,
 ) -> None:
     if not jobs or any(not job.patterns for job in jobs):
         raise ValueError("at least one keyword rule is required in every selected keyword set")
@@ -152,7 +155,7 @@ def rescan_keyword_sets(
                     row = next(rows)
                 except StopIteration:
                     return
-                futures[pool.submit(_analyze_saved_document, row, jobs)] = row
+                futures[pool.submit(_analyze_saved_document, row, jobs, report_config)] = row
 
         submit_available()
         while futures:
@@ -217,7 +220,7 @@ def rescan_keyword_sets(
                         else:
                             saved_document_id = document_id
                         for scan_run_id, analysis in result["analyses"]:
-                            save_match(database, int(scan_run_id), saved_document_id, analysis)
+                            save_match(database, int(scan_run_id), saved_document_id, analysis, report_config)
                         resolve_errors(
                             database,
                             capture_id=capture_id,
@@ -249,6 +252,7 @@ def rescan_documents(
     callback: Callable[[ProgressEvent], None] | None = None,
     document_ids: list[int] | None = None,
     workers: int | None = None,
+    report_config=None,
 ) -> None:
     rescan_keyword_sets(
         database,
@@ -257,4 +261,5 @@ def rescan_documents(
         callback,
         document_ids,
         workers,
+        report_config,
     )

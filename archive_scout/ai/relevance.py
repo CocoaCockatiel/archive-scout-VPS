@@ -15,6 +15,7 @@ from ..config import AIConfig, ProjectConfig
 from .models import AIRequest
 from .service import AIService
 from ..database.repositories import finish_ai_run, save_ai_results, start_ai_run
+from ..document_store import document_body
 from ..events import ProgressEvent, Stopped
 from ..utils import json_value
 
@@ -142,15 +143,14 @@ def _select_match_ids(database: sqlite3.Connection, scan_run_id: int, prompt: st
 def _candidate(database: sqlite3.Connection, match_id: int, excerpt_chars: int) -> Candidate | None:
     row = database.execute(
         """
-        SELECT m.id,m.score,m.snippets_json,m.hits_json,d.title,
-               SUBSTR(COALESCE(d.body_text,''),1,?) AS body_excerpt,
+        SELECT m.id,m.score,m.snippets_json,m.hits_json,d.*,
                c.original_url,c.timestamp
         FROM document_matches m
         JOIN documents d ON d.id=m.document_id
         JOIN captures c ON c.id=d.capture_id
         WHERE m.id=?
         """,
-        (max(1000, int(excerpt_chars)), int(match_id)),
+        (int(match_id),),
     ).fetchone()
     if not row:
         return None
@@ -168,7 +168,7 @@ def _candidate(database: sqlite3.Connection, match_id: int, excerpt_chars: int) 
         original_url=str(row["original_url"] or ""),
         snippets=snippets,
         hits=hits,
-        excerpt=str(row["body_excerpt"] or "")[:excerpt_chars],
+        excerpt=document_body(row)[:excerpt_chars],
     )
 
 

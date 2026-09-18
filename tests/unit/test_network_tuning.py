@@ -15,10 +15,16 @@ class NetworkTuningTests(unittest.TestCase):
         config = ProjectConfig(output_dir=Path("."), targets=["example.com/*"], keywords=[]).normalized()
         self.assertEqual(config.page_size, 100000)
         self.assertEqual(config.cdx_delay, 0.75)
-        self.assertEqual(config.network.page_blocks, 9)
+        self.assertEqual(config.network.page_blocks, 0)
         self.assertEqual(config.network.cdx_workers, 10)
         self.assertEqual(config.workers, 10)
+        self.assertEqual(config.scan_workers, 0)
+        self.assertEqual(config.max_file_mb, 25.0)
         self.assertEqual(config.download_delay, 0.125)
+        self.assertEqual(config.backup_keep, 5)
+        self.assertEqual(config.backup_max_mb, 1024.0)
+        self.assertFalse(config.auto_backup)
+        self.assertEqual(config.network.retry_max_seconds, 300.0)
 
     def test_paged_and_resume_requests_use_larger_batches(self):
         config = ProjectConfig(

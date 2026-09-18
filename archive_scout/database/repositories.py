@@ -7,6 +7,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 from ..constants import REVIEW_STATUSES
+from ..document_store import compress_text, document_body
 from ..scanning.keywords import keyword_rules_to_lines, parse_keyword_rules, serialize_keyword_rules
 from ..utils import utc_now
 
@@ -238,6 +239,43 @@ def delete_scan_run(database: sqlite3.Connection, scan_run_id: int) -> None:
     database.execute("DELETE FROM scan_runs WHERE id=?", (scan_run_id,))
 
 
+def _fts_enabled(database: sqlite3.Connection) -> bool:
+    row = database.execute("SELECT value FROM project_meta WHERE key='fts5'").fetchone()
+    return bool(row and row["value"] == "1")
+
+
+def _fts_replace_document(
+    database: sqlite3.Connection,
+    document_id: int,
+    title: str,
+    body_text: str,
+    original_url: str,
+    old_row: sqlite3.Row | None = None,
+) -> None:
+    if not _fts_enabled(database):
+        return
+    # External-content FTS stores only the inverted index.  Deleting an indexed
+    # row requires the old token stream, so recover it from the compact body
+    # cache when an existing document changes.
+    if old_row is not None:
+        old_title = str(old_row["title"] or "")
+        old_original = str(old_row["original_url"] or original_url)
+        old_body = document_body(old_row)
+        try:
+            database.execute(
+                "INSERT INTO documents_fts(documents_fts,rowid,title,body_text,original_url) VALUES('delete',?,?,?,?)",
+                (document_id, old_title, old_body, old_original),
+            )
+        except sqlite3.OperationalError:
+            # Older SQLite builds may not support the delete command on the
+            # exact external-content shape. Rebuild-on-repair remains safe.
+            pass
+    database.execute(
+        "INSERT INTO documents_fts(rowid,title,body_text,original_url) VALUES(?,?,?,?)",
+        (document_id, title, body_text, original_url),
+    )
+
+
 def upsert_document(
     database: sqlite3.Connection,
     capture_id: int,
@@ -250,12 +288,21 @@ def upsert_document(
     size_bytes: int,
 ) -> int:
     now = utc_now()
+    capture = database.execute(
+        "SELECT original_url FROM captures WHERE id=?", (capture_id,)
+    ).fetchone()
+    original = str(capture["original_url"] if capture else "")
     row = database.execute(
-        """SELECT id,path,title,links_json,content_hash,normalized_hash,size_bytes
+        """SELECT id,path,title,body_text,body_zlib,body_chars,original_url,links_json,
+                  content_hash,normalized_hash,size_bytes
            FROM documents WHERE capture_id=?""",
         (capture_id,),
     ).fetchone()
     links_json = json.dumps(links, ensure_ascii=False)
+    # The canonical replay file is authoritative. Avoid storing another full
+    # body in SQLite when that file is safely present; compressed body_zlib is
+    # only a fallback for imported/legacy records without a durable local file.
+    body_blob = None if Path(path).is_file() else compress_text(body_text)
     document_changed = True
     if row:
         document_id = int(row["id"])
@@ -267,52 +314,59 @@ def upsert_document(
                 str(row["content_hash"] or "") != content_hash,
                 str(row["normalized_hash"] or "") != normalized_hash,
                 int(row["size_bytes"] or 0) != int(size_bytes),
+                int(row["body_chars"] or 0) != len(body_text),
             )
         )
         if document_changed:
             database.execute(
                 """
-                UPDATE documents SET path=?,title=?,body_text=?,links_json=?,content_hash=?,normalized_hash=?,size_bytes=?,updated_at=?
+                UPDATE documents SET path=?,title=?,body_text='',body_zlib=?,body_chars=?,original_url=?,
+                    links_json=?,content_hash=?,normalized_hash=?,size_bytes=?,updated_at=?
                 WHERE id=?
                 """,
-                (str(path), title, body_text, links_json, content_hash, normalized_hash, size_bytes, now, document_id),
+                (str(path), title, body_blob, len(body_text), original, links_json, content_hash, normalized_hash, size_bytes, now, document_id),
             )
     else:
         cursor = database.execute(
             """
-            INSERT INTO documents(capture_id,path,title,body_text,links_json,content_hash,normalized_hash,size_bytes,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO documents(capture_id,path,title,body_text,body_zlib,body_chars,original_url,links_json,content_hash,normalized_hash,size_bytes,created_at,updated_at)
+            VALUES(?,?,?,'',?,?,?,?,?,?,?,?,?)
             """,
-            (capture_id, str(path), title, body_text, links_json, content_hash, normalized_hash, size_bytes, now, now),
+            (capture_id, str(path), title, body_blob, len(body_text), original, links_json, content_hash, normalized_hash, size_bytes, now, now),
         )
         document_id = int(cursor.lastrowid)
     database.execute(
-        """UPDATE captures SET document_id=?,state='downloaded',bytes_saved=?,updated_at=?
-           WHERE id=? AND (document_id IS NOT ? OR state IS NOT 'downloaded' OR bytes_saved IS NOT ?)""",
-        (document_id, size_bytes, now, capture_id, document_id, int(size_bytes)),
+        """UPDATE captures SET document_id=?,state='downloaded',local_path=?,content_hash=?,bytes_saved=?,updated_at=?
+           WHERE id=? AND (document_id IS NOT ? OR state IS NOT 'downloaded' OR COALESCE(local_path,'') IS NOT ?
+                           OR COALESCE(content_hash,'') IS NOT ? OR bytes_saved IS NOT ?)""",
+        (document_id, str(path), content_hash, size_bytes, now, capture_id,
+         document_id, str(path), content_hash, int(size_bytes)),
     )
     if document_changed:
-        fts_enabled = database.execute("SELECT value FROM project_meta WHERE key='fts5'").fetchone()
-        if fts_enabled and fts_enabled["value"] == "1":
-            original = database.execute("SELECT original_url FROM captures WHERE id=?", (capture_id,)).fetchone()["original_url"]
-            database.execute("DELETE FROM documents_fts WHERE rowid=?", (document_id,))
-            database.execute(
-                "INSERT INTO documents_fts(rowid,title,body_text,original_url) VALUES(?,?,?,?)",
-                (document_id, title, body_text, original),
-            )
+        _fts_replace_document(database, document_id, title, body_text, original, row)
     return document_id
 
-
-def save_match(database: sqlite3.Connection, scan_run_id: int, document_id: int, analysis: dict) -> int:
+def save_match(
+    database: sqlite3.Connection,
+    scan_run_id: int,
+    document_id: int,
+    analysis: dict,
+    report_config=None,
+) -> int:
     now = utc_now()
+    store_keyword_counts = report_config is None or bool(report_config.store_keyword_counts)
+    store_keyword_fields = report_config is None or bool(report_config.store_keyword_fields)
+    store_snippets = report_config is None or bool(report_config.store_snippets)
+    store_interesting_links = report_config is None or bool(report_config.store_interesting_links)
+    create_default_reviews = report_config is None or bool(report_config.create_default_reviews)
     values = (
         scan_run_id,
         document_id,
         int(round(float(analysis.get("score") or 0))),
-        json.dumps(analysis.get("hits") or {}, ensure_ascii=False, sort_keys=True),
-        json.dumps(analysis.get("hit_fields") or {}, ensure_ascii=False, sort_keys=True),
-        json.dumps(analysis.get("snippets") or [], ensure_ascii=False),
-        json.dumps(analysis.get("interesting_links") or [], ensure_ascii=False),
+        (json.dumps(analysis.get("hits") or {}, ensure_ascii=False, sort_keys=True) if store_keyword_counts else None),
+        (json.dumps(analysis.get("hit_fields") or {}, ensure_ascii=False, sort_keys=True) if store_keyword_fields else None),
+        (json.dumps(analysis.get("snippets") or [], ensure_ascii=False) if store_snippets else None),
+        (json.dumps(analysis.get("interesting_links") or [], ensure_ascii=False) if store_interesting_links else None),
         int(bool(analysis.get("excluded"))),
         int(bool(analysis.get("required_missing"))),
         json.dumps(analysis.get("proximity") or {}, ensure_ascii=False, sort_keys=True),
@@ -349,19 +403,108 @@ def save_match(database: sqlite3.Connection, scan_run_id: int, document_id: int,
     ).fetchone()
     match_id = int(row["id"])
     if match_changed:
+        # hits_json/fields_json are the canonical match representation. Older
+        # releases duplicated the same information into keyword_hits, which
+        # materially inflated million-page databases without any internal read
+        # path using that table. Remove legacy duplicates and do not recreate
+        # them for v1.0.6 matches.
         database.execute("DELETE FROM keyword_hits WHERE match_id=?", (match_id,))
-        fields = analysis.get("hit_fields") or {}
-        hit_rows = [
-            (match_id, label, int(count), json.dumps(fields.get(label, []), ensure_ascii=False))
-            for label, count in (analysis.get("hits") or {}).items()
-        ]
-        if hit_rows:
-            database.executemany(
-                "INSERT INTO keyword_hits(match_id,label,count,fields_json) VALUES(?,?,?,?)",
-                hit_rows,
-            )
-    database.execute("INSERT OR IGNORE INTO reviews(match_id,status) VALUES(?,'unreviewed')", (match_id,))
+    if create_default_reviews:
+        database.execute("INSERT OR IGNORE INTO reviews(match_id,status) VALUES(?,'unreviewed')", (match_id,))
+    else:
+        # Default, untouched review rows exist solely to print "unreviewed" in
+        # reports. Do not keep them when that field is disabled; preserve any
+        # actual human review state.
+        database.execute(
+            "DELETE FROM reviews WHERE match_id=? AND status='unreviewed' AND reviewer IS NULL AND reviewed_at IS NULL",
+            (match_id,),
+        )
     return match_id
+
+
+def apply_report_storage_policy(database: sqlite3.Connection, report_config) -> int:
+    """Drop obsolete report-only payloads once when report preferences change.
+
+    The policy fingerprint lives in project_meta, so large document_matches tables
+    are not revisited on every operation. Core match score/linkage and all capture
+    manifest/retry state remain untouched. SQLite may retain freed pages until a
+    later Compact Project/VACUUM, but disabled enrichment is no longer live data
+    and no new rows store it.
+    """
+    report = report_config.normalized() if hasattr(report_config, "normalized") else report_config
+    policy = {
+        "hits": bool(report.store_keyword_counts),
+        "hit_fields": bool(report.store_keyword_fields),
+        "snippets": bool(report.store_snippets),
+        "interesting_links": bool(report.store_interesting_links),
+        "default_reviews": bool(report.create_default_reviews),
+    }
+    fingerprint = json.dumps(policy, sort_keys=True, separators=(",", ":"))
+    row = database.execute(
+        "SELECT value FROM project_meta WHERE key='report_storage_policy_v1'"
+    ).fetchone()
+    if row and str(row[0]) == fingerprint:
+        return 0
+
+    before = database.total_changes
+    if not policy["hits"]:
+        database.execute("UPDATE document_matches SET hits_json=NULL WHERE hits_json IS NOT NULL")
+    if not policy["hit_fields"]:
+        database.execute("UPDATE document_matches SET fields_json=NULL WHERE fields_json IS NOT NULL")
+    if not policy["snippets"]:
+        database.execute("UPDATE document_matches SET snippets_json=NULL WHERE snippets_json IS NOT NULL")
+    if not policy["interesting_links"]:
+        database.execute(
+            "UPDATE document_matches SET interesting_links_json=NULL WHERE interesting_links_json IS NOT NULL"
+        )
+    if not policy["default_reviews"]:
+        database.execute(
+            "DELETE FROM reviews WHERE status='unreviewed' AND reviewer IS NULL AND reviewed_at IS NULL"
+        )
+    database.execute(
+        "INSERT OR REPLACE INTO project_meta(key,value) VALUES('report_storage_policy_v1',?)",
+        (fingerprint,),
+    )
+    return database.total_changes - before
+
+
+def record_recovery_event(
+    database: sqlite3.Connection,
+    stage: str,
+    category: str,
+    message: str,
+    *,
+    capture_id: int | None = None,
+    media_capture_id: int | None = None,
+    details: dict | None = None,
+) -> int:
+    cursor = database.execute(
+        """INSERT INTO recovery_events(stage,category,message,capture_id,media_capture_id,details_json,created_at)
+           VALUES(?,?,?,?,?,?,?)""",
+        (stage, category, message, capture_id, media_capture_id, json.dumps(details or {}, ensure_ascii=False), utc_now()),
+    )
+    return int(cursor.lastrowid)
+
+
+def mark_capture_skipped(database: sqlite3.Connection, capture_id: int, reason: str, classifier_revision: int = 1) -> None:
+    database.execute(
+        "UPDATE captures SET state='skipped',skip_reason=?,classifier_revision=?,updated_at=? WHERE id=?",
+        (reason, int(classifier_revision), utc_now(), int(capture_id)),
+    )
+
+
+def requeue_reclassifiable_skips(database: sqlite3.Connection, download_scope: str, classifier_revision: int = 1) -> int:
+    reasons = ["ambiguous_metadata", "legacy_non_text"]
+    if download_scope == "all_text":
+        reasons.append("url_keyword_filter")
+    placeholders = ",".join("?" for _ in reasons)
+    before = database.total_changes
+    database.execute(
+        f"""UPDATE captures SET state='pending',skip_reason=NULL,classifier_revision=?,updated_at=?
+             WHERE state='skipped' AND (skip_reason IN ({placeholders}) OR classifier_revision<?)""",
+        [int(classifier_revision), utc_now(), *reasons, int(classifier_revision)],
+    )
+    return database.total_changes - before
 
 
 def record_error(
@@ -553,9 +696,10 @@ def _result_filters(
         clauses.append("COALESCE(r.status,'unreviewed')=?")
         params.append(review_status)
     if search.strip():
-        clauses.append("(LOWER(c.original_url) LIKE ? OR LOWER(d.title) LIKE ? OR LOWER(d.body_text) LIKE ?)")
+        clauses.append("(LOWER(c.original_url) LIKE ? OR LOWER(d.title) LIKE ? OR d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH ?))")
         value = "%" + search.casefold() + "%"
-        params.extend([value, value, value])
+        phrase = '"' + search.replace('"', '""') + '"'
+        params.extend([value, value, phrase])
     return clauses, params
 
 

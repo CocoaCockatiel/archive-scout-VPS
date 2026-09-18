@@ -237,7 +237,7 @@ def _run_command(args: argparse.Namespace) -> int:
     config = _load(args.project)
     stop_event = threading.Event()
     interrupted = False
-    previous_handler = None
+    previous_handlers: dict[int, object] = {}
 
     def handle_interrupt(_signum, _frame) -> None:
         nonlocal interrupted
@@ -245,8 +245,9 @@ def _run_command(args: argparse.Namespace) -> int:
         stop_event.set()
 
     if threading.current_thread() is threading.main_thread():
-        previous_handler = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT, handle_interrupt)
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[sig] = signal.getsignal(sig)
+            signal.signal(sig, handle_interrupt)
 
     def progress(event: ProgressEvent) -> None:
         record = {"type": "progress", "event": event.to_dict()}
@@ -283,8 +284,8 @@ def _run_command(args: argparse.Namespace) -> int:
             return EXIT_DEFERRED
         raise
     finally:
-        if previous_handler is not None:
-            signal.signal(signal.SIGINT, previous_handler)
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
         if interrupted:
             stop_event.set()
 

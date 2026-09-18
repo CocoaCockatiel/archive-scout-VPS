@@ -6,6 +6,7 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 
+from ..document_store import document_body
 from ..config import ProjectConfig
 from ..utils import clean_space, normalize_search, utc_now
 from .embeddings import cosine_int8, encode_text, vector_bands
@@ -182,7 +183,7 @@ def search_research(
         placeholders = ",".join("?" for _ in chunk)
         rows = database.execute(
             f"""
-            SELECT rv.document_id,rv.vector_blob,rv.dimensions,d.title,d.body_text,c.original_url,c.timestamp,
+            SELECT rv.document_id,rv.vector_blob,rv.dimensions,d.*,c.original_url,c.timestamp,
                    COALESCE((SELECT MAX(score) FROM document_matches m WHERE m.document_id=d.id AND m.excluded=0 AND m.required_missing=0),0) AS archive_score,
                    (SELECT dm.group_id FROM duplicate_members dm WHERE dm.document_id=d.id LIMIT 1) AS duplicate_group_id
             FROM research_vectors rv
@@ -213,7 +214,7 @@ def search_research(
                 timestamp=str(row["timestamp"] or ""),
                 original_url=str(row["original_url"] or ""),
                 title=str(row["title"] or ""),
-                snippet=str(row["body_text"] or ""),  # trimmed after ranking
+                snippet=document_body(row),  # trimmed after ranking
                 duplicate_group_id=int(row["duplicate_group_id"]) if row["duplicate_group_id"] is not None else None,
                 entities=entities,
             ))

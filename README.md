@@ -20,17 +20,19 @@ crashes and normal VPS reboots.
 
 Archive Scout is a cross-platform desktop research workspace for indexing, downloading, searching, reviewing, reconstructing, and analyzing public captures from the Internet Archive's Wayback Machine.
 
-Archive Scout 1.0.5 is the fast-indexing and flat-media release. Automatic indexing now follows the high-throughput Timemap pattern used by the reference downloader: page count once, pageSize=9, ten concurrent CDX page workers, and a rolling 1,000-page queue with resume-key fallback. Media downloads use the same ten-worker/eight-starts-per-second replay envelope, fetch with the reference if_/oe_ modifiers, and save directly under media/images or media/videos using the original URL filename.
+Archive Scout 1.0.7 is a reliability, acquisition-throughput, media-workflow, and report-control release. It preserves the v1.0.5-style high-throughput Timemap/replay profile while keeping the later durable-resume safeguards, moves potentially slow startup preparation off the Tk event thread, lets the optional media pipeline run after download-only acquisition, and keeps that secondary media query separate from the primary text CDX query. Reports are now fully configurable by output file and field; report-only derived payloads that no enabled report needs are not stored in SQLite.
 
 ## Downloads
 
-- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.5/ArchiveScout-Windows-x64.zip)
-- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.5/ArchiveScout-Linux-x64.zip)
-- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.5/ArchiveScout-macOS-Universal.zip)
+- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.7/ArchiveScout-Windows-x64.zip)
+- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.7/ArchiveScout-Linux-x64.zip)
+- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout/releases/download/v1.0.7/ArchiveScout-macOS-Universal.zip)
 
 ## Core workflow
 
 A typical research project follows this sequence:
+
+For bulk acquisition where scanning can wait, choose **Index and download only (no scanning)**. That mode requires no keyword set, writes only capture/resume state to SQLite, leaves saved captures as `downloaded_unscanned`, and is designed to be followed by **Search with Hitlist** or a later local rescan.
 
 1. Add one or more sites, URL prefixes, or exact URLs.
 2. Set the archive date range and optional CDX parameters.
@@ -46,9 +48,15 @@ A typical research project follows this sequence:
 
 Archive Scout stores project state in SQLite so long jobs can be stopped and resumed without starting over.
 
+## Report control
+
+Advanced mode includes a **Reports** page where every standard text, index/error, media, and archive-analysis report can be enabled or disabled, and every field/column inside those reports can be selected independently. Disabling report-only enrichment also avoids retaining unnecessary scan payloads: snippets, Interesting Links, keyword-hit detail/field lists, and untouched default review rows are stored only when an enabled report needs them. Core manifest state such as URLs, timestamps, local paths, queue/resume status, and operational errors remains independent of report formatting so disabling a report cannot break Resume, Retry, or Search with Hitlist.
+
+When **Also download media during text and download-only runs** is enabled, the Media-page controls apply to both workflows, including embedded discovery and external hosts. Follow-up media uses one timestamp per media URL (`collapse=urlkey`) by default for the normal `earliest` strategy; that media-only default never changes the primary text query's collapse settings.
+
 ## Research Intelligence
 
-Archive Scout 1.0.5 treats a completed project as one evidence corpus. The local research index combines full-text evidence, compact vectors, extracted entities/identifiers, duplicate clusters, deterministic Archive Scout scores, hyperlinks, provenance relationships, reconstructed forum relationships, and capture timestamps.
+Archive Scout 1.0.6 treats a completed project as one evidence corpus. The local research index combines full-text evidence, compact vectors, extracted entities/identifiers, duplicate clusters, deterministic Archive Scout scores, hyperlinks, provenance relationships, reconstructed forum relationships, and capture timestamps.
 
 The **Research intelligence** tab can:
 
@@ -169,7 +177,7 @@ The offline benchmark runner can exercise large CDX parsing, database insertion,
 
 Text-capture discovery explicitly recognizes legacy web/page formats including `.htm`, `.shtm`, `.dhtm`, `.xhtm`, `.phtm`, `.cgi`, `.php`, `.dat`, and `.txt` in addition to the existing HTML/XML/JSON/script formats.
 
-### Timemap-first parallel indexing in 1.0.5
+### Timemap-first parallel indexing (retained in 1.0.6)
 
 Automatic indexing now asks Wayback Timemap for the numbered-page count once, uses `pageSize=9`, and keeps up to ten page requests active behind the shared 0.75-second CDX start limiter. Up to 1,000 pages are queued behind that bounded worker pool so one slow request does not create a small-batch barrier. Each completed page is committed immediately and its row buffer is released.
 

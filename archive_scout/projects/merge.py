@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Callable
 
 from ..database.connection import DATABASE_NAME
-from ..database.repositories import get_or_create_media_target, get_or_create_target
+from ..database.repositories import get_or_create_media_target, get_or_create_target, upsert_document
+from ..document_store import decompress_text, document_body
 from ..events import ProgressEvent, Stopped
 from ..media.downloader import media_path
 from ..utils import atomic_write_text, utc_now
@@ -57,18 +58,31 @@ def _value(row: sqlite3.Row, columns: set[str], name: str, default=None):
     return row[name] if name in columns else default
 
 
+def _source_body(row: sqlite3.Row) -> str:
+    keys = set(row.keys())
+    body = str(row["body_text"] or "") if "body_text" in keys else ""
+    if body:
+        return body
+    if "body_zlib" in keys and row["body_zlib"] is not None:
+        return decompress_text(row["body_zlib"])
+    return ""
+
+
 def _rebuild_fts(database: sqlite3.Connection) -> None:
     enabled = database.execute("SELECT value FROM project_meta WHERE key='fts5'").fetchone()
     if not enabled or str(enabled["value"]) != "1":
         return
-    database.execute("DELETE FROM documents_fts")
+    database.execute("DROP TABLE IF EXISTS documents_fts")
     database.execute(
-        """
-        INSERT INTO documents_fts(rowid,title,body_text,original_url)
-        SELECT d.id,COALESCE(d.title,''),COALESCE(d.body_text,''),c.original_url
-        FROM documents d JOIN captures c ON c.id=d.capture_id
-        """
+        "CREATE VIRTUAL TABLE documents_fts USING fts5(title,body_text,original_url,content='')"
     )
+    for row in database.execute(
+        "SELECT d.*,c.original_url AS capture_original_url FROM documents d JOIN captures c ON c.id=d.capture_id ORDER BY d.id"
+    ):
+        database.execute(
+            "INSERT INTO documents_fts(rowid,title,body_text,original_url) VALUES(?,?,?,?)",
+            (int(row["id"]), str(row["title"] or ""), document_body(row), str(row["capture_original_url"] or "")),
+        )
 
 
 def merge_projects(
@@ -151,24 +165,17 @@ def merge_projects(
                     destination_path = (
                         destination_root / "captures" / "merged" / fingerprint / f"recovered_{int(row['id'])}.txt"
                     )
-                    atomic_write_text(destination_path, str(row["body_text"] or ""))
-                existing_doc = database.execute("SELECT id FROM documents WHERE capture_id=?", (capture_map[old_capture],)).fetchone()
-                if existing_doc:
-                    document_id = int(existing_doc["id"])
-                else:
-                    cursor = database.execute(
-                        """
-                        INSERT INTO documents(
-                            capture_id,path,title,body_text,links_json,content_hash,normalized_hash,size_bytes,created_at,updated_at
-                        ) VALUES(?,?,?,?,?,?,?,?,?,?)
-                        """,
-                        (
-                            capture_map[old_capture], str(destination_path), row["title"], row["body_text"], row["links_json"],
-                            row["content_hash"], row["normalized_hash"], row["size_bytes"], row["created_at"], row["updated_at"],
-                        ),
-                    )
-                    document_id = int(cursor.lastrowid)
-                    database.execute("UPDATE captures SET document_id=?,state='downloaded' WHERE id=?", (document_id, capture_map[old_capture]))
+                    atomic_write_text(destination_path, _source_body(row))
+                body = _source_body(row)
+                try:
+                    links = json.loads(str(row["links_json"] or "[]"))
+                    links = [str(value) for value in links] if isinstance(links, list) else []
+                except Exception:
+                    links = []
+                document_id = upsert_document(
+                    database, capture_map[old_capture], destination_path, str(row["title"] or ""), body, links,
+                    str(row["content_hash"] or ""), str(row["normalized_hash"] or ""), int(row["size_bytes"] or 0),
+                )
                 document_map[int(row["id"])] = document_id
                 summary["documents"] += 1
 

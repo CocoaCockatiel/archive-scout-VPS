@@ -4,9 +4,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from archive_scout.config import ProjectConfig, ReportConfig, save_project_config
 from archive_scout.discord_bot import (
     JobManager,
     build_help_text,
+    ensure_all_matches_report,
     live_matches_text,
     parse_snowflakes,
     parse_targets,
@@ -80,6 +82,29 @@ def test_oversized_text_report_is_zipped_for_discord(tmp_path: Path) -> None:
     assert spreadsheet_upload != upload
     with __import__("zipfile").ZipFile(spreadsheet_upload) as bundle:
         assert bundle.namelist() == [spreadsheet.name]
+
+
+def test_disabled_combined_report_rejects_cached_file(tmp_path: Path) -> None:
+    save_project_config(
+        ProjectConfig(output_dir=tmp_path, targets=["example.com/*"], keywords=["test"], report=ReportConfig(outputs=[])),
+    )
+    reports = tmp_path / "reports"
+    reports.mkdir(exist_ok=True)
+    (reports / "all_matches_ranked.md").write_text("old report", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="disabled"):
+        ensure_all_matches_report(tmp_path, "all_matches_ranked.md")
+
+
+def test_enabled_combined_report_reuses_existing_file(tmp_path: Path) -> None:
+    save_project_config(ProjectConfig(output_dir=tmp_path, targets=["example.com/*"], keywords=["test"]))
+    reports = tmp_path / "reports"
+    reports.mkdir(exist_ok=True)
+    report = reports / "all_matches_ranked.md"
+    report.write_text("existing report", encoding="utf-8")
+
+    assert ensure_all_matches_report(tmp_path, report.name) == report
+    assert not (tmp_path / "archive_scout.sqlite3").exists()
 
 
 def test_help_text_explains_configured_concurrency() -> None:

@@ -23,10 +23,13 @@ class V105ReleaseTests(unittest.TestCase):
             network=NetworkConfig(index_strategy='auto'),
         ).normalized()
         self.assertEqual(preferred_index_strategy(config, 'example.com/*'), 'paged')
-        self.assertEqual(config.network.page_blocks, 9)
+        self.assertEqual(config.network.page_blocks, 0)
         self.assertEqual(config.network.cdx_workers, 10)
         self.assertEqual(config.cdx_delay, 0.75)
-        self.assertIn('/web/timemap/json', cdx_paged_endpoints(config)[0])
+        self.assertEqual(
+            cdx_paged_endpoints(config),
+            ('https://web.archive.org/web/timemap/json',),
+        )
         self.assertEqual(effective_page_workers(10, 9), 10)
 
 
@@ -90,8 +93,8 @@ class V105ReleaseTests(unittest.TestCase):
             'original_url': 'http://example.com/media/clip.mp4',
             'media_kind': 'video', 'extension': '.mp4',
         }
-        self.assertEqual(media_path(root, image), root / 'media' / 'images' / 'photo%20one.jpg')
-        self.assertEqual(media_path(root, video), root / 'media' / 'videos' / 'clip.mp4')
+        self.assertEqual(media_path(root, image), root / 'media' / 'images' / 'http%3A%2F%2Fexample.com%2Fgallery%2Fphoto%20one.jpg')
+        self.assertEqual(media_path(root, video), root / 'media' / 'videos' / 'http%3A%2F%2Fexample.com%2Fmedia%2Fclip.mp4')
         self.assertEqual(len(media_path(root, image).relative_to(root / 'media').parts), 2)
         self.assertEqual(len(media_path(root, video).relative_to(root / 'media').parts), 2)
 
